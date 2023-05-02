@@ -1,0 +1,9 @@
+nbody.cc: In function 'int main(int, char**)':
+nbody.cc:213:36: error: 'get_missile_cost' was not declared in this scope
+                     missile_cost = get_missile_cost((step + 1) * param::dt);
+                                    ^~~~~~~~~~~~~~~~
+nbody.cc:213:36: note: suggested alternative:
+nbody.cc:22:8: note:   'param::get_missile_cost'
+ double get_missile_cost(double t) { return 1e5 + 1e3 * t; }
+        ^~~~~~~~~~~~~~~~
+make: *** [seq] Error 1
