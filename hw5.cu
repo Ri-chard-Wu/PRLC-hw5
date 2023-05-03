@@ -10,17 +10,37 @@
 #include <vector>
 
 
+
+// const int n_steps = 200000;
+// const double dt = 60;
+// const double eps = 1e-3;
+// const double G = 6.674e-11;
+
+#define n_steps 200000
+#define dt 60
+#define eps 1e-3
+#define G 6.674e-11
+#define planet_radius 1e7
+#define missile_speed 1e6
+
+
+__device__ 
+double gravity_device_mass(double m0, double t) {
+    return m0 + 0.5 * m0 * fabs(sin(t / 6000));
+}
+
+__device__
+double get_missile_cost(double t) {
+    return 1e5 + 1e3 * t; 
+}
+
+
+
 using namespace std::chrono;
 using namespace std;
 
 
-
-
-
-
 #define N_THRD_PER_BLK 32
-// #define N_BLK 512
-
 
 #define BODY_SIZE_BYTE 64 
 #define BODY_SIZE_WORD 16 
@@ -28,6 +48,7 @@ using namespace std;
 #define BATCH_SIZE_WORD (BATCH_SIZE * BODY_SIZE_WORD)
 
 typedef unsigned int WORD;
+typedef unsigned char BYTE;
 
 struct Body{
     
@@ -46,28 +67,29 @@ struct Input{
 
 
 __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
-                                                             unsigned char *bodyArray){
+                                            BYTE *bodyArray, BYTE *min_dist){
 
     int gtid = blockIdx.x * blockDim.x + threadIdx.x;
     int bodyId_this = gtid;
     int tid = threadIdx.x;
     if(bodyId_this >= n) return;
 
-
-    double ax = 0, ay = 0, az = 0;
-    double vx, vy, vz, qx, qy, qz;
+    double ax = 0, ay = 0, az = 0, dx, dy, dz;
     
-    vx = ((Body *)bodyArray)[bodyId_this].vx;
-    vy = ((Body *)bodyArray)[bodyId_this].vy;
-    vz = ((Body *)bodyArray)[bodyId_this].vz;
+    double vx = ((Body *)bodyArray)[bodyId_this].vx;
+    double vy = ((Body *)bodyArray)[bodyId_this].vy;
+    double vz = ((Body *)bodyArray)[bodyId_this].vz;
 
-    qx = ((Body *)bodyArray)[bodyId_this].qx;
-    qy = ((Body *)bodyArray)[bodyId_this].qy;
-    qz = ((Body *)bodyArray)[bodyId_this].qz;
+    double qx = ((Body *)bodyArray)[bodyId_this].qx;
+    double qy = ((Body *)bodyArray)[bodyId_this].qy;
+    double qz = ((Body *)bodyArray)[bodyId_this].qz;
 
 
     int n_batch = n / BATCH_SIZE;
+    if(n_batch * BATCH_SIZE < n) n_batch += 1;
     __shared__ WORD sm[BATCH_SIZE_WORD];
+
+
 
     for(int batchId = 0; batchId < n_batch; batchId++){
         
@@ -89,27 +111,47 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
                 mj = gravity_device_mass(mj, step * dt);
             }
 
-            double dx = ((Body *)sm)[i].qx - qx;
-            double dy = ((Body *)sm)[i].qy - qy;
-            double dz = ((Body *)sm)[i].qz - qz;
+            dx = ((Body *)sm)[i].qx - qx;
+            dy = ((Body *)sm)[i].qy - qy;
+            dz = ((Body *)sm)[i].qz - qz;
 
             double dist3 = pow(dx * dx + dy * dy + dz * dz + eps *eps, 1.5);
 
             ax += G * mj * dx / dist3;    
             ay += G * mj * dy / dist3;    
             az += G * mj * dz / dist3; 
-
         }
     }
 
 
-    vx += ax * param::dt;
-    vy += ay * param::dt;
-    vz += az * param::dt;
+    vx += ax * dt;
+    vy += ay * dt;
+    vz += az * dt;
     
-    qx += vx * param::dt;
-    qy += vy * param::dt;
-    qz += vz * param::dt; 
+    qx += vx * dt;
+    qy += vy * dt;
+    qz += vz * dt; 
+
+
+    // write back.
+    ((Body *)bodyArray)[bodyId_this].vx = vx;
+    ((Body *)bodyArray)[bodyId_this].vy = vy;
+    ((Body *)bodyArray)[bodyId_this].vz = vz;
+
+    ((Body *)bodyArray)[bodyId_this].qx = qx;
+    ((Body *)bodyArray)[bodyId_this].qy = qy;
+    ((Body *)bodyArray)[bodyId_this].qz = qz;    
+
+
+    // update min_dist.
+    if(bodyId_this == planetId){
+
+        dx = qx - ((Body *)bodyArray)[asteroidId].qx;
+        dy = qy - ((Body *)bodyArray)[asteroidId].qy;
+        dz = qz - ((Body *)bodyArray)[asteroidId].qz;
+
+        *((double *)min_dist) = min(*((double *)min_dist), sqrt(dx * dx + dy * dy + dz * dz));  
+    }
 }
 
 
@@ -151,7 +193,7 @@ void read_input(const char* filename, Input *input) {
 int main(int argc, char **argv)
 {
     Input input;
-    unsigned char *bodyArray_dev;
+    BYTE *bodyArray_dev, *min_dist_dev;
 
     read_input(argv[1], &input);
 
@@ -159,26 +201,36 @@ int main(int argc, char **argv)
         if (input.bodyArray[i].isDevice == 1) input.bodyArray[i].m = 0;
     }
 
-    printf("sizeof(Body): %d\n", sizeof(Body));
+    // printf("sizeof(Body): %d\n", sizeof(Body));
+
 
     cudaSetDevice(0);
+
     cudaMalloc(&bodyArray_dev, input.n * sizeof(Body));
-    cudaMemcpy(bodyArray_dev, (unsigned char *)input.bodyArray,
-                                          input.n * sizeof(Body), cudaMemcpyHostToDevice);
+    cudaMemcpy(bodyArray_dev, (BYTE *)(input.bodyArray),
+                            input.n * sizeof(Body), cudaMemcpyHostToDevice);
     
-    for (int step = 1; step <= param::n_steps; step++) {
+    dx = input.bodyArray[input.planetId].qx - input.bodyArray[input.asteroidId].qx;
+    dy = input.bodyArray[input.planetId].qy - input.bodyArray[input.asteroidId].qy;
+    dz = input.bodyArray[input.planetId].qz - input.bodyArray[input.asteroidId].qz;
+    double min_dist_host = sqrt(dx * dx + dy * dy + dz * dz);
 
-        int n_block = input.n / N_THRD_PER_BLK + 1;
+    cudaMalloc(&min_dist_dev, sizeof(double));
+    cudaMemcpy(min_dist_dev, (BYTE *)min_dist_host,
+                                    sizeof(double), cudaMemcpyHostToDevice);
 
+    int n_block = input.n / N_THRD_PER_BLK + 1;
+    
+    for (int step = 1; step <= n_steps; step++) {
         kernel_problem1<<<n_block, N_THRD_PER_BLK>>>(step, input.n, input.planetId, 
-                                            input.asteroidId, bodyArray_dev);
-
+                                            input.asteroidId, bodyArray_dev, min_dist_dev);
     }
 
+    cudaDeviceSynchronize();
+    cudaMemcpy((BYTE *)min_dist_host, min_dist_dev, 
+                                    sizeof(double), cudaMemcpyDeviceToHost);    
 
-
-
-
+    print("min_dist_host: %f\n", min_dist_host)
 
 
 
