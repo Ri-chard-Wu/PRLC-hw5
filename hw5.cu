@@ -94,7 +94,6 @@ void read_input(const char* filename, Input *input) {
             input->bodyArray[i].isDevice = 1;
         }
     }
-
 }
 
 
@@ -109,7 +108,7 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
     int gtid = blockIdx.x * blockDim.x + threadIdx.x;
     int bodyId_this = gtid;
     int tid = threadIdx.x;
-    if(bodyId_this >= n) return;
+    // if(bodyId_this >= n) return;
 
 
 
@@ -119,14 +118,18 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
 
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
-    
-    double vx = ((Body *)bodyArray)[bodyId_this].vx;
-    double vy = ((Body *)bodyArray)[bodyId_this].vy;
-    double vz = ((Body *)bodyArray)[bodyId_this].vz;
+    double vx, vy, vz, qx, qy, qz;
 
-    double qx = ((Body *)bodyArray)[bodyId_this].qx;
-    double qy = ((Body *)bodyArray)[bodyId_this].qy;
-    double qz = ((Body *)bodyArray)[bodyId_this].qz;
+    if(bodyId_this < n){
+        vx = ((Body *)bodyArray)[bodyId_this].vx;
+        vy = ((Body *)bodyArray)[bodyId_this].vy;
+        vz = ((Body *)bodyArray)[bodyId_this].vz;
+
+        qx = ((Body *)bodyArray)[bodyId_this].qx;
+        qy = ((Body *)bodyArray)[bodyId_this].qy;
+        qz = ((Body *)bodyArray)[bodyId_this].qz;
+    }
+
 
 
     int n_batch = n / BATCH_SIZE;
@@ -179,13 +182,15 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
 
 
     // write back.
-    ((Body *)bodyArray)[bodyId_this].vx = vx;
-    ((Body *)bodyArray)[bodyId_this].vy = vy;
-    ((Body *)bodyArray)[bodyId_this].vz = vz;
+    if(bodyId_this < n){
+        ((Body *)bodyArray)[bodyId_this].vx = vx;
+        ((Body *)bodyArray)[bodyId_this].vy = vy;
+        ((Body *)bodyArray)[bodyId_this].vz = vz;
 
-    ((Body *)bodyArray)[bodyId_this].qx = qx;
-    ((Body *)bodyArray)[bodyId_this].qy = qy;
-    ((Body *)bodyArray)[bodyId_this].qz = qz;    
+        ((Body *)bodyArray)[bodyId_this].qx = qx;
+        ((Body *)bodyArray)[bodyId_this].qy = qy;
+        ((Body *)bodyArray)[bodyId_this].qz = qz; 
+    }   
 
     __syncthreads();
 
@@ -210,6 +215,11 @@ int main(int argc, char **argv)
     Input input;
     BYTE *bodyArray_dev, *min_dist_dev;
 
+
+    auto start = high_resolution_clock::now();
+
+
+
     read_input(argv[1], &input);
 
     for (int i = 0; i < input.n; i++) {
@@ -229,7 +239,7 @@ int main(int argc, char **argv)
     double dy = input.bodyArray[input.planetId].qy - input.bodyArray[input.asteroidId].qy;
     double dz = input.bodyArray[input.planetId].qz - input.bodyArray[input.asteroidId].qz;
     double min_dist_host = sqrt(dx * dx + dy * dy + dz * dz);
-    printf("min_dist_host: %f\n", min_dist_host);
+    // printf("min_dist_host: %f\n", min_dist_host);
 
     cudaMalloc(&min_dist_dev, sizeof(double));
     cudaMemcpy(min_dist_dev, (BYTE *)&min_dist_host,
@@ -248,6 +258,9 @@ int main(int argc, char **argv)
 
     printf("min_dist_host: %f\n", min_dist_host);
     
+    auto stop = high_resolution_clock::now();
+    auto duration = duration_cast<microseconds>(stop - start);
+    cout<<"problem 1 time: "<<duration.count()/ 1000000.0 <<" sec"<<endl;
 
 
 
