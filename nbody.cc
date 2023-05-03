@@ -134,22 +134,11 @@ int main(int argc, char** argv) {
 
     read_input(argv[1], n, planet, asteroid, qx, qy, qz, vx, vy, vz, m, type);
 
-    // int n_devices = 0;
     for (int i = 0; i < n; i++) {
         if (type[i] == "device") {
             m[i] = 0;
-            // n_devices++;
         }
     }
-
-    // int *deviceIds = new int[n_devices];
-
-    // for (int i = 0; i < n; i++) {
-    //     if (type[i] == "device") {
-    //         deviceIds[i] = 
-    //     }
-    // }
-
 
     for (int step = 0; step <= param::n_steps; step++) {
         if (step > 0) {
@@ -160,6 +149,8 @@ int main(int argc, char** argv) {
         dz = qz[planet] - qz[asteroid];
         min_dist = std::min(min_dist, sqrt(dx * dx + dy * dy + dz * dz));
     }
+
+
 
 
     // Problem 2
@@ -178,10 +169,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // int hit_time_step = 1;
-    // double min_dist = 0;
 
-    
 
     // Problem 3
     read_input(argv[1], n, planet, asteroid, qx, qy, qz, vx, vy, vz, m, type);
