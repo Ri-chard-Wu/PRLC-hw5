@@ -39,13 +39,17 @@ double get_missile_cost(double t) {
 using namespace std::chrono;
 using namespace std;
 
+#define N_THRD_PER_BLK_X 4
+#define N_THRD_PER_BLK_Y 8
+#define N_THRD_PER_BLK (N_THRD_PER_BLK_X * N_THRD_PER_BLK_Y)
 
-#define N_THRD_PER_BLK 32
 
 #define BODY_SIZE_BYTE 64 
 #define BODY_SIZE_WORD 16 
-#define BATCH_SIZE (N_THRD_PER_BLK * 4 / BODY_SIZE_BYTE) // (32 * 4 / 64) == 2.
+#define BATCH_SIZE (N_THRD_PER_BLK_Y)
 #define BATCH_SIZE_WORD (BATCH_SIZE * BODY_SIZE_WORD)
+#define N_BODY_COPY_PER_PASS (N_THRD_PER_BLK * 4 / BODY_SIZE_BYTE) // (32 * 4 / 64) == 2.
+
 
 typedef unsigned int WORD;
 typedef unsigned char BYTE;
@@ -98,24 +102,14 @@ void read_input(const char* filename, Input *input) {
 
 
 
-
-
+// thread_per_block is 2D:
+//      y: determine body_other.
+//      x: determine body_this.
 __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
                                             BYTE *bodyArray, BYTE *min_dist){
 
-                                               
-
-    int gtid = blockIdx.x * blockDim.x + threadIdx.x;
-    int bodyId_this = gtid;
-    int tid = threadIdx.x;
-    // if(bodyId_this >= n) return;
-
-
-
-    // if(step == 1 && gtid == 0){
-    //     printf("*((double *)min_dist): %f\n", *((double *)min_dist)); 
-    // }
-
+    int bodyId_this = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
     double vx, vy, vz, qx, qy, qz;
@@ -131,71 +125,92 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
     }
 
 
-
     int n_batch = n / BATCH_SIZE;
     if(n_batch * BATCH_SIZE < n) n_batch += 1;
-    __shared__ WORD sm[BATCH_SIZE_WORD];
 
+    __shared__ WORD sm[BATCH_SIZE_WORD + N_THRD_PER_BLK_Y * 3 * 2 * N_THRD_PER_BLK_X];
+    WORD *sm_aggregate = sm + BATCH_SIZE_WORD;
 
 
     for(int batchId = 0; batchId < n_batch; batchId++){
         
-        if(batchId * BATCH_SIZE_WORD + tid < n * BODY_SIZE_WORD){
-            sm[tid] = ((WORD *)bodyArray)[batchId * BATCH_SIZE_WORD + tid];
+        for(int i = 0; i < BATCH_SIZE; i += N_BODY_COPY_PER_PASS){
+
+            int global_offset = batchId * BATCH_SIZE_WORD;
+            int local_offset = i * BODY_SIZE_WORD + tid;
+            int idx = global_offset + local_offset ;
+
+            if(idx < n * BODY_SIZE_WORD){
+                sm[local_offset] = ((WORD *)bodyArray)[idx];
+            }
         }
+
         __syncthreads();
 
 
-        for(int i = 0; i < BATCH_SIZE; i++){
-
-            int bodyId_other = batchId * BATCH_SIZE + i;
-            if(bodyId_other >= n) break;
-            if (bodyId_other == bodyId_this) continue;
-
-
-            double mj = ((Body *)sm)[i].m;
-            if (((Body *)sm)[i].isDevice == 1) {
+        int bodyId_other = batchId * BATCH_SIZE + threadIdx.y;
+        
+        if ((bodyId_other != bodyId_this) && (bodyId_other < n)){
+        
+            double mj = ((Body *)sm)[threadIdx.y].m;
+            if (((Body *)sm)[threadIdx.y].isDevice == 1) {
                 mj = gravity_device_mass(mj, step * dt);
             }
 
-            dx = ((Body *)sm)[i].qx - qx;
-            dy = ((Body *)sm)[i].qy - qy;
-            dz = ((Body *)sm)[i].qz - qz;
+            dx = ((Body *)sm)[threadIdx.y].qx - qx;
+            dy = ((Body *)sm)[threadIdx.y].qy - qy;
+            dz = ((Body *)sm)[threadIdx.y].qz - qz;
 
-            double dist3 = pow(dx * dx + dy * dy + dz * dz + eps *eps, 1.5);
+            double dist3 = pow(dx * dx + dy * dy + dz * dz + eps * eps, 1.5);
 
             ax += G * mj * dx / dist3;    
             ay += G * mj * dy / dist3;    
             az += G * mj * dz / dist3; 
         }
+        
     }
 
+    ((double *)sm_aggregate)[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 0] = ax;
+    ((double *)sm_aggregate)[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 1] = ay;
+    ((double *)sm_aggregate)[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 2] = az;
 
+    __syncthreads();
 
-    vx += ax * dt;
-    vy += ay * dt;
-    vz += az * dt;
-    
-    qx += vx * dt;
-    qy += vy * dt;
-    qz += vz * dt; 
+    // aggregate 
+    if(threadIdx.y == 0){
 
+        for(int i = 1; i < threadIdx.y; i++){
+            ax += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 0];
+            ay += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 1];
+            az += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 2];
+        }
 
-    // write back.
-    if(bodyId_this < n){
-        ((Body *)bodyArray)[bodyId_this].vx = vx;
-        ((Body *)bodyArray)[bodyId_this].vy = vy;
-        ((Body *)bodyArray)[bodyId_this].vz = vz;
+        vx += ax * dt;
+        vy += ay * dt;
+        vz += az * dt;
+        
+        qx += vx * dt;
+        qy += vy * dt;
+        qz += vz * dt; 
 
-        ((Body *)bodyArray)[bodyId_this].qx = qx;
-        ((Body *)bodyArray)[bodyId_this].qy = qy;
-        ((Body *)bodyArray)[bodyId_this].qz = qz; 
-    }   
+        // write back.
+        if(bodyId_this < n){
+            ((Body *)bodyArray)[bodyId_this].vx = vx;
+            ((Body *)bodyArray)[bodyId_this].vy = vy;
+            ((Body *)bodyArray)[bodyId_this].vz = vz;
+
+            ((Body *)bodyArray)[bodyId_this].qx = qx;
+            ((Body *)bodyArray)[bodyId_this].qy = qy;
+            ((Body *)bodyArray)[bodyId_this].qz = qz; 
+        }  
+
+    }
+
 
     __syncthreads();
 
     // update min_dist.
-    if(bodyId_this == planetId){
+    if((bodyId_this == planetId) && (threadIdx.y == 0)){
 
         dx = qx - ((Body *)bodyArray)[asteroidId].qx;
         dy = qy - ((Body *)bodyArray)[asteroidId].qy;
@@ -216,7 +231,7 @@ int main(int argc, char **argv)
     BYTE *bodyArray_dev, *min_dist_dev;
 
 
-    auto start = high_resolution_clock::now();
+    
 
 
 
@@ -245,12 +260,23 @@ int main(int argc, char **argv)
     cudaMemcpy(min_dist_dev, (BYTE *)&min_dist_host,
                                     sizeof(double), cudaMemcpyHostToDevice);
 
-    int n_block = input.n / N_THRD_PER_BLK + 1;
-    
+    int n_block = input.n / N_THRD_PER_BLK_X + 1;
+    dim3 nThreadsPerBlock(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
+
+    auto start = high_resolution_clock::now();
+
     for (int step = 1; step <= n_steps; step++) {
-        kernel_problem1<<<n_block, N_THRD_PER_BLK>>>(step, input.n, input.planetId, 
-                                            input.asteroidId, bodyArray_dev, min_dist_dev);                                          
+
+        
+        kernel_problem1<<<n_block, nThreadsPerBlock>>>(step, input.n, input.planetId, 
+                                            input.asteroidId, bodyArray_dev, min_dist_dev);
+
     }
+
+    auto stop = high_resolution_clock::now();
+    auto duration = duration_cast<microseconds>(stop - start);
+    cout<<"problem 1 time: "<<duration.count() <<" us"<<endl;
+
 
     cudaDeviceSynchronize();
     cudaMemcpy((BYTE *)&min_dist_host, min_dist_dev, 
@@ -258,9 +284,7 @@ int main(int argc, char **argv)
 
     printf("min_dist_host: %f\n", min_dist_host);
     
-    auto stop = high_resolution_clock::now();
-    auto duration = duration_cast<microseconds>(stop - start);
-    cout<<"problem 1 time: "<<duration.count()/ 1000000.0 <<" sec"<<endl;
+
 
 
 

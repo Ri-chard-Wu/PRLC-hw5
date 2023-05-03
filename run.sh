@@ -27,7 +27,7 @@ golden_outFile=./testcases/b$testCase.out
 if [ -f "$RunFile" ]; then
 
     echo "==================================="
-    echo "=            Run hw4             ="
+    echo "=            Run hw5             ="
     echo "==================================="
 
     export CUDA_VISIBLE_DEVICES=0,1
