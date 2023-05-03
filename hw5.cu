@@ -66,13 +66,57 @@ struct Input{
 
 
 
+
+
+void read_input(const char* filename, Input *input) {
+
+    std::ifstream fin(filename);
+    fin >> input->n >> input->planetId >> input->asteroidId;
+
+    input->bodyArray = new Body[input->n];
+
+    string type;
+
+    for (int i = 0; i < input->n; i++) {
+        fin >> input->bodyArray[i].qx 
+            >> input->bodyArray[i].qy
+            >> input->bodyArray[i].qz 
+            >> input->bodyArray[i].vx 
+            >> input->bodyArray[i].vy 
+            >> input->bodyArray[i].vz 
+            >> input->bodyArray[i].m 
+            >> type;
+        
+        if (type != "device"){
+            input->bodyArray[i].isDevice = 0;
+        }
+        else{
+            input->bodyArray[i].isDevice = 1;
+        }
+    }
+
+}
+
+
+
+
+
 __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
                                             BYTE *bodyArray, BYTE *min_dist){
+
+                                               
 
     int gtid = blockIdx.x * blockDim.x + threadIdx.x;
     int bodyId_this = gtid;
     int tid = threadIdx.x;
     if(bodyId_this >= n) return;
+
+
+
+    // if(step == 1 && gtid == 0){
+    //     printf("*((double *)min_dist): %f\n", *((double *)min_dist)); 
+    // }
+
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
     
@@ -124,6 +168,7 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
     }
 
 
+
     vx += ax * dt;
     vy += ay * dt;
     vz += az * dt;
@@ -142,6 +187,7 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
     ((Body *)bodyArray)[bodyId_this].qy = qy;
     ((Body *)bodyArray)[bodyId_this].qz = qz;    
 
+    __syncthreads();
 
     // update min_dist.
     if(bodyId_this == planetId){
@@ -150,42 +196,11 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
         dy = qy - ((Body *)bodyArray)[asteroidId].qy;
         dz = qz - ((Body *)bodyArray)[asteroidId].qz;
 
-        *((double *)min_dist) = min(*((double *)min_dist), sqrt(dx * dx + dy * dy + dz * dz));  
+        *((double *)min_dist) = min(*((double *)min_dist), 
+                                sqrt(dx * dx + dy * dy + dz * dz));  
     }
 }
 
-
-
-
-
-void read_input(const char* filename, Input *input) {
-
-    std::ifstream fin(filename);
-    fin >> input->n >> input->planetId >> input->asteroidId;
-
-    input->bodyArray = new Body[input->n];
-
-    string type;
-
-    for (int i = 0; i < input->n; i++) {
-        fin >> input->bodyArray[i].qx 
-            >> input->bodyArray[i].qy
-            >> input->bodyArray[i].qz 
-            >> input->bodyArray[i].vx 
-            >> input->bodyArray[i].vy 
-            >> input->bodyArray[i].vz 
-            >> input->bodyArray[i].m 
-            >> type;
-        
-        if (type != "device"){
-            input->bodyArray[i].isDevice = 0;
-        }
-        else{
-            input->bodyArray[i].isDevice = 1;
-        }
-    }
-
-}
 
 
 
@@ -210,27 +225,29 @@ int main(int argc, char **argv)
     cudaMemcpy(bodyArray_dev, (BYTE *)(input.bodyArray),
                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
     
-    dx = input.bodyArray[input.planetId].qx - input.bodyArray[input.asteroidId].qx;
-    dy = input.bodyArray[input.planetId].qy - input.bodyArray[input.asteroidId].qy;
-    dz = input.bodyArray[input.planetId].qz - input.bodyArray[input.asteroidId].qz;
+    double dx = input.bodyArray[input.planetId].qx - input.bodyArray[input.asteroidId].qx;
+    double dy = input.bodyArray[input.planetId].qy - input.bodyArray[input.asteroidId].qy;
+    double dz = input.bodyArray[input.planetId].qz - input.bodyArray[input.asteroidId].qz;
     double min_dist_host = sqrt(dx * dx + dy * dy + dz * dz);
+    printf("min_dist_host: %f\n", min_dist_host);
 
     cudaMalloc(&min_dist_dev, sizeof(double));
-    cudaMemcpy(min_dist_dev, (BYTE *)min_dist_host,
+    cudaMemcpy(min_dist_dev, (BYTE *)&min_dist_host,
                                     sizeof(double), cudaMemcpyHostToDevice);
 
     int n_block = input.n / N_THRD_PER_BLK + 1;
     
     for (int step = 1; step <= n_steps; step++) {
         kernel_problem1<<<n_block, N_THRD_PER_BLK>>>(step, input.n, input.planetId, 
-                                            input.asteroidId, bodyArray_dev, min_dist_dev);
+                                            input.asteroidId, bodyArray_dev, min_dist_dev);                                          
     }
 
     cudaDeviceSynchronize();
-    cudaMemcpy((BYTE *)min_dist_host, min_dist_dev, 
+    cudaMemcpy((BYTE *)&min_dist_host, min_dist_dev, 
                                     sizeof(double), cudaMemcpyDeviceToHost);    
 
-    print("min_dist_host: %f\n", min_dist_host)
+    printf("min_dist_host: %f\n", min_dist_host);
+    
 
 
 
