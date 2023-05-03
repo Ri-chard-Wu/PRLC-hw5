@@ -17,27 +17,27 @@ using namespace std;
 
 
 
-#define N_BLK 1000
-#define N_THRD_PER_BLK 512
+#define N_BLK 512
+#define N_THRD_PER_BLK 32
 
 
 
 
-__global__ void kernel()
+__global__ void kernel(int *src, int incre)
 {
 
     int gtid = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.x;
-    double a = 1.;
-
-    for(int i =0;i<10000000;i++){
-        a *= 1.000000001;
+    
+    if(gtid == 0){
+        printf("\n----------------------\n");
     }
+    
+    src[gtid] += incre + gtid;
 
-    // printf("gtid: %d\n", gtid);
-    if(gtid==0){
-        printf("%f\n", a);
-    }
+    if(tid == 0 && blockIdx.x < 10){
+        printf("src[%d]: %d, incre: %d\n", gtid, src[gtid], incre);
+    }    
     
 }
 
@@ -46,40 +46,30 @@ __global__ void kernel()
 
 int main(int argc, char **argv)
 {
-    // int size = 1000;
-    // unsigned char *devSrc0, *devSrc1, *hostSrc0, *hostSrc1;
-
-    // cudaSetDevice(0);
-    // // cudaMalloc(&devSrc0, size);
-    // // cudaMemcpy(devSrc0, hostSrc0, size, cudaMemcpyHostToDevice);
-    // kernel<<<N_BLK, N_THRD_PER_BLK>>>();
-
-    // cudaSetDevice(1);
-    // // cudaMalloc(&devSrc1, size);
-    // // cudaMemcpy(devSrc0, hostSrc1, size, cudaMemcpyHostToDevice);
-    // kernel<<<N_BLK, N_THRD_PER_BLK>>>();   
-    // cudaDeviceSynchronize();
-
-    // // cudaMalloc(blockHeaderDev, BLK_HDR_SIZE);
-    // // cudaMemcpy(*blockHeaderDev, (unsigned char*)block, BLK_HDR_SIZE, cudaMemcpyHostToDevice);
-
-    // // cudaMalloc(nonceValidDev, sizeof(int));
-    // // cudaMemset(*nonceValidDev, 0, sizeof(int));
-
-
-    auto start = high_resolution_clock::now();
+    int size = N_BLK * N_THRD_PER_BLK;
+    int *devSrc0, *hostSrc0;
+    hostSrc0 = new int[size];
+    for (int i = 0 ;i<size;i++){
+        hostSrc0[i] = 0;
+    }
 
     cudaSetDevice(0);
-    kernel<<<N_BLK, N_THRD_PER_BLK>>>();
+    cudaMalloc(&devSrc0, size * sizeof(int));
+    cudaMemcpy((unsigned char *)devSrc0, (unsigned char *)hostSrc0,
+                                         size * sizeof(int), cudaMemcpyHostToDevice);
 
-    cudaSetDevice(1);
-    kernel<<<N_BLK, N_THRD_PER_BLK>>>();  
+    kernel<<<N_BLK, N_THRD_PER_BLK, 0>>>(devSrc0, 4);
+    kernel<<<N_BLK, N_THRD_PER_BLK, 0>>>(devSrc0, 5);
+    kernel<<<N_BLK, N_THRD_PER_BLK, 0>>>(devSrc0, 10);
+    kernel<<<N_BLK, N_THRD_PER_BLK, 0>>>(devSrc0, 20);
 
     cudaDeviceSynchronize();   
-   
-    auto stop = high_resolution_clock::now();
-    auto duration = duration_cast<microseconds>(stop - start);
-    cout<<"time: "<<duration.count()<<" us"<<endl;
+
+    // cudaMalloc(blockHeaderDev, BLK_HDR_SIZE);
+    // cudaMemcpy(*blockHeaderDev, (unsigned char*)block, BLK_HDR_SIZE, cudaMemcpyHostToDevice);
+
+    // cudaMalloc(nonceValidDev, sizeof(int));
+    // cudaMemset(*nonceValidDev, 0, sizeof(int));
 
 
 
