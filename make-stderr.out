@@ -1,8 +1,6 @@
-hw5.cu(123): warning: variable "devSrc0" was declared but never referenced
-
-hw5.cu(123): warning: variable "hostSrc0" was declared but never referenced
+hw5.cu(131): warning: variable "bodyArray_dev" was declared but never referenced
 
 hw5.cu: In function 'int main(int, char**)':
-hw5.cu:131:42: warning: format '%d' expects argument of type 'int', but argument 2 has type 'long unsigned int' [-Wformat=]
+hw5.cu:139:42: warning: format '%d' expects argument of type 'int', but argument 2 has type 'long unsigned int' [-Wformat=]
      printf("sizeof(Body): %d\n", sizeof(Body));
                                           ^
