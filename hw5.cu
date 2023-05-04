@@ -105,13 +105,14 @@ void read_input(const char* filename, Input *input) {
 
 
 __global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int asteroidId,
-                                BYTE *bodyArray, BYTE *bodyArray_update, BYTE *min_dist_sq){
+                                Body *bodyArray, Body *bodyArray_update, BYTE *min_dist_sq){
+
 
     int bodyId_this = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
-    double vx, vy, vz, qx, qy, qz;
+    double qx, qy, qz;
 
     
     // clock_t start_time = clock(); 
@@ -120,18 +121,17 @@ __global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int 
 
    
     if(bodyId_this < n){
-       
-        qx = ((Body *)bodyArray)[bodyId_this].qx;
-        qy = ((Body *)bodyArray)[bodyId_this].qy;
-        qz = ((Body *)bodyArray)[bodyId_this].qz;
+        qx = bodyArray[bodyId_this].qx;
+        qy = bodyArray[bodyId_this].qy;
+        qz = bodyArray[bodyId_this].qz;
     }
 
     // update min_dist.
     if((bodyId_this == planetId) && (threadIdx.y == 0)){
 
-        dx = qx - ((Body *)bodyArray)[asteroidId].qx;
-        dy = qy - ((Body *)bodyArray)[asteroidId].qy;
-        dz = qz - ((Body *)bodyArray)[asteroidId].qz;
+        dx = qx - bodyArray[asteroidId].qx;
+        dy = qy - bodyArray[asteroidId].qy;
+        dz = qz - bodyArray[asteroidId].qz;
 
         *((double *)min_dist_sq) = min(*((double *)min_dist_sq), 
                                              dx * dx + dy * dy + dz * dz);  
@@ -215,33 +215,28 @@ __global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int 
         __syncthreads();
     }
 
+
+
+    if((threadIdx.y < 3) && (bodyId_this < n)){
+        
+        
+        double *v_ptr = (double *)&(bodyArray[bodyId_this].vx);
+        double *q_ptr_update = (double *)&(bodyArray_update[bodyId_this].qx);
+        double *v_ptr_update = (double *)&(bodyArray_update[bodyId_this].vx);
+        double *q_ptr_update_sm = sm_aggregate + (3 * blockDim.x + 3 * threadIdx.x);
+   
+        q_ptr_update_sm[0] = qx;
+        q_ptr_update_sm[1] = qy;
+        q_ptr_update_sm[2] = qz;
     
-    __syncthreads();
 
-    if(threadIdx.y == 0){
+        
+        double vi = v_ptr[threadIdx.y];
+        vi += sm_aggregate[3 * threadIdx.x + threadIdx.y];
 
-        vx = ((Body *)bodyArray)[bodyId_this].vx;
-        vy = ((Body *)bodyArray)[bodyId_this].vy;
-        vz = ((Body *)bodyArray)[bodyId_this].vz;
-
-        vx += sm_aggregate[3 * threadIdx.x + 0];
-        vy += sm_aggregate[3 * threadIdx.x + 1];
-        vz += sm_aggregate[3 * threadIdx.x + 2];
-
-        qx += vx * dt;
-        qy += vy * dt;
-        qz += vz * dt; 
-
-        // write back.
-        if(bodyId_this < n){
-            ((Body *)bodyArray_update)[bodyId_this].vx = vx;
-            ((Body *)bodyArray_update)[bodyId_this].vy = vy;
-            ((Body *)bodyArray_update)[bodyId_this].vz = vz;
-
-            ((Body *)bodyArray_update)[bodyId_this].qx = qx;
-            ((Body *)bodyArray_update)[bodyId_this].qy = qy;
-            ((Body *)bodyArray_update)[bodyId_this].qz = qz; 
-        }  
+        v_ptr_update[threadIdx.y] = vi;
+        q_ptr_update[threadIdx.y] = q_ptr_update_sm[threadIdx.y] + vi * dt;
+        
     }
 }
 
@@ -252,7 +247,8 @@ __global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int 
 int main(int argc, char **argv)
 {
     Input input;
-    BYTE *bodyArray1_dev, *bodyArray2_dev, *min_dist_sq_dev;
+    Body *bodyArray1_dev, *bodyArray2_dev;
+    BYTE *min_dist_sq_dev;
 
 
 
@@ -266,11 +262,11 @@ int main(int argc, char **argv)
     cudaSetDevice(0);
 
     cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
-    cudaMemcpy(bodyArray1_dev, (BYTE *)(input.bodyArray),
+    cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
 
     cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
-    cudaMemcpy(bodyArray2_dev, (BYTE *)(input.bodyArray),
+    cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
 
     double min_dist_sq_host = std::numeric_limits<double>::infinity();
@@ -292,7 +288,7 @@ int main(int argc, char **argv)
         kernel_problem1<<<n_block, nThreadsPerBlock>>>(step, n_batch, input.n, input.planetId, 
                      input.asteroidId, bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
         
-        BYTE *tmp = bodyArray1_dev;
+        Body *tmp = bodyArray1_dev;
         bodyArray1_dev = bodyArray2_dev;
         bodyArray2_dev = tmp;
     }
