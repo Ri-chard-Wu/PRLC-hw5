@@ -507,12 +507,122 @@ void problem2(cudaStream_t stream, char* filename, int *hit_time_step_ptr){
     auto duration = duration_cast<microseconds>(stop - start);
     cout<<"problem 2 time: "<<duration.count() / 1000000. <<" sec"<<endl;
 
+}
 
+
+
+
+
+
+void problem3(cudaStream_t stream, char* filename, int hit_time_step, 
+                                        int *gravity_device_id_ptr, double *missile_cost_ptr){
+
+    Input input;
+    Body *bodyArray1_dev, *bodyArray2_dev;
+    // BYTE *hit_time_step_dev;
+
+    read_input(filename, &input);
+
+    cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
+    cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
+                            input.n * sizeof(Body), cudaMemcpyHostToDevice);
+
+    cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
+    cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
+                            input.n * sizeof(Body), cudaMemcpyHostToDevice);
+
+
+    int n_block = input.n / N_THRD_PER_BLK_X + 1;
+    dim3 nThreadsPerBlock(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
+
+    int n_batch = input.n / BATCH_SIZE;
+    if(n_batch * BATCH_SIZE < input.n) n_batch += 1;
+
+
+    BYTE *missile_cost_dev;
+    double missile_cost_host;
+    cudaMalloc(&missile_cost_dev, sizeof(int));
+
+
+    BYTE *success_dev;
+    int success_host;
+    cudaMalloc(&success_dev, sizeof(int));
+
+
+    int gravity_device_id_min = -1;
+    double missile_cost_min = std::numeric_limits<double>::infinity();
+
+    bool success;  
+
+    if(hit_time_step != -2){
+
+        for(int i = 0; i < n; i++){
+
+            if(input.Body[i].isDevice != 1) continue;
+            if(input.Body[i].m[i] == 0) continue;
+
+            gravity_device_id = i;
+            success = true;
+
+            success_host = 1;
+            cudaMemcpy(success_dev, (BYTE *)&success_host
+                                sizeof(int), cudaMemcpyHostToDevice);            
+
+
+
+            for (int step = 0; step <= n_steps; step++) {
+
+                kernel_problem3<<<n_block, nThreadsPerBlock, 0, stream>>>\
+                        (step, n_batch, input.n, input.planetId, input.asteroidId, 
+                        bodyArray1_dev, bodyArray2_dev, 
+                        gravity_device_id, missile_cost_dev, success_dev);
+
+
+                if((step & (16 - 1)) == 0){
+                    // cudaMemcpyAsync((BYTE *)missile_cost_host, missile_cost_dev, 
+                    //                                 sizeof(double), cudaMemcpyDeviceToHost);
+
+                    cudaMemcpyAsync((BYTE *)success_host, success_dev, 
+                                                    sizeof(int), cudaMemcpyDeviceToHost);
+
+                    if(success_host != 1) break;
+                }              
+            }
+
+            cudaDeviceSynchronize();
+            cudaMemcpy((BYTE *)success_host, success_dev, 
+                                            sizeof(double), cudaMemcpyDeviceToHost);
+            cudaMemcpy((BYTE *)missile_cost_host, missile_cost_dev, 
+                                            sizeof(double), cudaMemcpyDeviceToHost);
+
+
+            if(success_host){
+                if(missile_cost_host < missile_cost_min){
+                    missile_cost_min = missile_cost_host;
+                    gravity_device_id_min = gravity_device_id;
+                }
+            }
+            // read_input(argv[1], n, planet, asteroid, qx, qy, qz, vx, vy, vz, m, type);
+        }
+
+    }
+
+    if(gravity_device_id_min == -1){
+        gravity_device_id = -1;
+        missile_cost = 0;
+    }
 
 
 }
 
 
+
+
+
+int hit_time_step;
+double min_dist;
+int gravity_device_id;
+double missile_cost;
 
 int main(int argc, char **argv)
 {
@@ -530,23 +640,24 @@ int main(int argc, char **argv)
 
 
     // cudaSetDevice(0);
-    // double min_dist, min_dist_sq;
+    // double min_dist_sq;
     // problem1(stream0[0], argv[1], &min_dist_sq);
     // cudaDeviceSynchronize();
-    
     // min_dist = sqrt(min_dist_sq);
     // printf("min_dist: %f\n", min_dist);
 
 
+
+
+    // cudaSetDevice(0);
+    // problem2(stream0[1], argv[1], &hit_time_step);
+    // printf("hit_time_step: %d\n", hit_time_step);
+
+
+
+    hit_time_step = 10;
     cudaSetDevice(0);
-    int hit_time_step;
-    problem2(stream0[1], argv[1], &hit_time_step);
-    
-    printf("hit_time_step: %d\n", hit_time_step);
-
-
-
-
+    problem3(stream0[1], argv[1], hit_time_step, &gravity_device_id, &missile_cost);
 
 
   
