@@ -1,6 +1,4 @@
-hw5.cu(143): warning: variable "tid" was declared but never referenced
+hw5.cu(30): warning: variable "tid" was declared but never referenced
 
-hw5.cu(145): warning: variable "m" was declared but never referenced
-
-hw5.cu(175): warning: variable "qmArray_sm" was declared but never referenced
+hw5.cu(48): warning: variable "tid" was declared but never referenced
 
