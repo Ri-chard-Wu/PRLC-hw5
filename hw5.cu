@@ -111,6 +111,8 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
     int bodyId_this = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
 
+    // printf("threadIdx.y: %d, threadIdx.x: %d\n", threadIdx.y, threadIdx.x);
+
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
     double vx, vy, vz, qx, qy, qz;
 
@@ -138,7 +140,7 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
 
             int global_offset = batchId * BATCH_SIZE_WORD;
             int local_offset = i * BODY_SIZE_WORD + tid;
-            int idx = global_offset + local_offset ;
+            int idx = global_offset + local_offset;
 
             if(idx < n * BODY_SIZE_WORD){
                 sm[local_offset] = ((WORD *)bodyArray)[idx];
@@ -146,7 +148,6 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
         }
 
         __syncthreads();
-
 
         int bodyId_other = batchId * BATCH_SIZE + threadIdx.y;
         
@@ -167,6 +168,7 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
             ay += G * mj * dy / dist3;    
             az += G * mj * dz / dist3; 
         }
+
         
     }
 
@@ -179,10 +181,10 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
     // aggregate 
     if(threadIdx.y == 0){
 
-        for(int i = 1; i < threadIdx.y; i++){
-            ax += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 0];
-            ay += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 1];
-            az += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 2];
+        for(int i = 1; i < blockDim.y; i++){
+            ax += ((double *)sm_aggregate)[i * (3 * blockDim.x) + 3 * threadIdx.x + 0];
+            ay += ((double *)sm_aggregate)[i * (3 * blockDim.x) + 3 * threadIdx.x + 1];
+            az += ((double *)sm_aggregate)[i * (3 * blockDim.x) + 3 * threadIdx.x + 2];
         }
 
         vx += ax * dt;
@@ -203,7 +205,6 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
             ((Body *)bodyArray)[bodyId_this].qy = qy;
             ((Body *)bodyArray)[bodyId_this].qz = qz; 
         }  
-
     }
 
 
@@ -215,6 +216,8 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
         dx = qx - ((Body *)bodyArray)[asteroidId].qx;
         dy = qy - ((Body *)bodyArray)[asteroidId].qy;
         dz = qz - ((Body *)bodyArray)[asteroidId].qz;
+
+        // printf("step: %d, sqrt(dx * dx + dy * dy + dz * dz): %f\n", step, sqrt(dx * dx + dy * dy + dz * dz));
 
         *((double *)min_dist) = min(*((double *)min_dist), 
                                 sqrt(dx * dx + dy * dy + dz * dz));  
@@ -273,12 +276,12 @@ int main(int argc, char **argv)
 
     }
 
+    cudaDeviceSynchronize();
+
     auto stop = high_resolution_clock::now();
     auto duration = duration_cast<microseconds>(stop - start);
     cout<<"problem 1 time: "<<duration.count() <<" us"<<endl;
 
-
-    cudaDeviceSynchronize();
     cudaMemcpy((BYTE *)&min_dist_host, min_dist_dev, 
                                     sizeof(double), cudaMemcpyDeviceToHost);    
 
