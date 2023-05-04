@@ -105,8 +105,8 @@ void read_input(const char* filename, Input *input) {
 // thread_per_block is 2D:
 //      y: determine body_other.
 //      x: determine body_this.
-__global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
-                                BYTE *bodyArray, BYTE *bodyArray_update, BYTE *min_dist){
+__global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int asteroidId,
+                                BYTE *bodyArray, BYTE *bodyArray_update, BYTE *min_dist_sq){
 
     int bodyId_this = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
@@ -115,6 +115,21 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
     double vx, vy, vz, qx, qy, qz;
+
+    
+    clock_t start_time = clock(); 
+    clock_t stop_time = clock();
+    int runtime = (int)(stop_time - start_time);
+
+
+    // start_time = clock(); 
+    // stop_time = clock();
+    // runtime = (int)(stop_time - start_time);
+    // if(gtid == 0){
+    //     printf("load sm dt: %d\n", runtime);
+    // }
+
+    start_time = clock(); 
 
     if(bodyId_this < n){
 
@@ -129,6 +144,14 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
         qz = ((Body *)bodyArray)[bodyId_this].qz;
     }
 
+    stop_time = clock();
+    runtime = (int)(stop_time - start_time);
+    if(bodyId_this == 0){
+        printf("1 dt: %d\n", runtime);
+    }
+
+
+    start_time = clock();
 
     // update min_dist.
     if((bodyId_this == planetId) && (threadIdx.y == 0)){
@@ -136,19 +159,17 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
         dx = qx - ((Body *)bodyArray)[asteroidId].qx;
         dy = qy - ((Body *)bodyArray)[asteroidId].qy;
         dz = qz - ((Body *)bodyArray)[asteroidId].qz;
-        
-        // if(step == 1){
-        //     printf("step: %d, *((double *)min_dist): %f\n", step, *((double *)min_dist));
-        // }
-        
 
-        *((double *)min_dist) = min(*((double *)min_dist), 
-                                sqrt(dx * dx + dy * dy + dz * dz));  
+        *((double *)min_dist_sq) = min(*((double *)min_dist_sq), 
+                                dx * dx + dy * dy + dz * dz);  
     }
 
+    stop_time = clock();
+    runtime = (int)(stop_time - start_time);
+    if(bodyId_this == 0){
+        printf("2 dt: %d\n", runtime);
+    }
 
-    int n_batch = n / BATCH_SIZE;
-    if(n_batch * BATCH_SIZE < n) n_batch += 1;
 
     __shared__ WORD sm[BATCH_SIZE_WORD + N_THRD_PER_BLK_Y * 3 * 2 * N_THRD_PER_BLK_X];
     double *sm_aggregate = (double *)(sm + BATCH_SIZE_WORD);
@@ -156,6 +177,8 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
 
     for(int batchId = 0; batchId < n_batch; batchId++){
         
+        start_time = clock();
+
         for(int i = 0; i < BATCH_SIZE; i += N_BODY_COPY_PER_PASS){
 
             int global_offset = batchId * BATCH_SIZE_WORD;
@@ -167,12 +190,27 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
             }
         }
 
+        stop_time = clock();
+        runtime = (int)(stop_time - start_time);
+        if(bodyId_this == 0){
+            printf("3 dt: %d\n", runtime);
+        }
+
         __syncthreads();
+
+
+
+
+
+
+        
 
         int bodyId_other = batchId * BATCH_SIZE + threadIdx.y;
         
         if ((bodyId_other != bodyId_this) && (bodyId_other < n)){
-        
+            
+            start_time = clock();
+
             double mj = ((Body *)sm)[threadIdx.y].m;
             if (((Body *)sm)[threadIdx.y].isDevice == 1) {
                 mj = gravity_device_mass(mj, step * dt);
@@ -187,7 +225,20 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
             ax += G * mj * dx / dist3;    
             ay += G * mj * dy / dist3;    
             az += G * mj * dz / dist3; 
+
+            stop_time = clock();
+            runtime = (int)(stop_time - start_time);
+            if(bodyId_this == 0){
+                printf("4 dt: %d\n", runtime);
+            }
+
+
         }
+
+
+
+
+
 
         
     }
@@ -197,6 +248,8 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
     sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 2] = az;
 
     __syncthreads();
+
+    start_time = clock();
 
     // aggregate 
     if(threadIdx.y == 0){
@@ -227,21 +280,11 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
         }  
     }
 
-
-    // __syncthreads();
-
-    // // update min_dist.
-    // if((bodyId_this == planetId) && (threadIdx.y == 0)){
-
-    //     dx = qx - ((Body *)bodyArray_update)[asteroidId].qx;
-    //     dy = qy - ((Body *)bodyArray_update)[asteroidId].qy;
-    //     dz = qz - ((Body *)bodyArray_update)[asteroidId].qz;
-
-    //     // printf("step: %d, sqrt(dx * dx + dy * dy + dz * dz): %f\n", step, sqrt(dx * dx + dy * dy + dz * dz));
-
-    //     *((double *)min_dist) = min(*((double *)min_dist), 
-    //                             sqrt(dx * dx + dy * dy + dz * dz));  
-    // }
+    stop_time = clock();
+    runtime = (int)(stop_time - start_time);
+    if(bodyId_this == 0){
+        printf("5 dt: %d\n", runtime);
+    }
 }
 
 
@@ -251,10 +294,8 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
 int main(int argc, char **argv)
 {
     Input input;
-    BYTE *bodyArray1_dev, *bodyArray2_dev, *min_dist_dev;
+    BYTE *bodyArray1_dev, *bodyArray2_dev, *min_dist_sq_dev;
 
-
-    
 
 
 
@@ -263,9 +304,6 @@ int main(int argc, char **argv)
     for (int i = 0; i < input.n; i++) {
         if (input.bodyArray[i].isDevice == 1) input.bodyArray[i].m = 0;
     }
-
-    // printf("sizeof(Body): %d\n", sizeof(Body));
-
 
     cudaSetDevice(0);
 
@@ -277,21 +315,24 @@ int main(int argc, char **argv)
     cudaMemcpy(bodyArray2_dev, (BYTE *)(input.bodyArray),
                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
 
-    double min_dist_host = std::numeric_limits<double>::infinity();
+    double min_dist_sq_host = std::numeric_limits<double>::infinity();
 
-    cudaMalloc(&min_dist_dev, sizeof(double));
-    cudaMemcpy(min_dist_dev, (BYTE *)&min_dist_host,
+    cudaMalloc(&min_dist_sq_dev, sizeof(double));
+    cudaMemcpy(min_dist_sq_dev, (BYTE *)&min_dist_sq_host,
                                     sizeof(double), cudaMemcpyHostToDevice);
 
     int n_block = input.n / N_THRD_PER_BLK_X + 1;
     dim3 nThreadsPerBlock(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
 
+    int n_batch = input.n / BATCH_SIZE;
+    if(n_batch * BATCH_SIZE < input.n) n_batch += 1;
+
     auto start = high_resolution_clock::now();
 
     for (int step = 1; step <= n_steps + 1; step++) {
 
-        kernel_problem1<<<n_block, nThreadsPerBlock>>>(step, input.n, input.planetId, 
-                     input.asteroidId, bodyArray1_dev, bodyArray2_dev, min_dist_dev);
+        kernel_problem1<<<n_block, nThreadsPerBlock>>>(step, n_batch, input.n, input.planetId, 
+                     input.asteroidId, bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
         
         BYTE *tmp = bodyArray1_dev;
         bodyArray1_dev = bodyArray2_dev;
@@ -304,10 +345,10 @@ int main(int argc, char **argv)
     auto duration = duration_cast<microseconds>(stop - start);
     cout<<"problem 1 time: "<<duration.count() / 1000000. <<" sec"<<endl;
 
-    cudaMemcpy((BYTE *)&min_dist_host, min_dist_dev, 
+    cudaMemcpy((BYTE *)&min_dist_sq_host, min_dist_sq_dev, 
                                     sizeof(double), cudaMemcpyDeviceToHost);    
 
-    printf("min_dist_host: %f\n", min_dist_host);
+    printf("min_dist_host: %f\n", sqrt(min_dist_sq_host));
     
 
 
