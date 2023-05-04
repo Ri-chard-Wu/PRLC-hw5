@@ -46,10 +46,12 @@ using namespace std;
 
 #define QM_SIZE_BYTE 32
 #define QM_SIZE_WORD 8
-#define BATCH_SIZE (32 * N_THRD_PER_BLK_Y)
+#define QM_SIZE_DOUBLE 4
+
+#define BATCH_SIZE (N_THRD_PER_BLK_Y)
+#define BATCH_QM_SIZE_DOUBLE (BATCH_SIZE * QM_SIZE_DOUBLE)
 #define BATCH_QM_SIZE_WORD (BATCH_SIZE * QM_SIZE_WORD)
 
-#define FLAG_SIZE_BYTE 4
 #define FLAG_SIZE_WORD 1
 #define BATCH_FLAG_SIZE_WORD (BATCH_SIZE * FLAG_SIZE_WORD)
 
@@ -57,7 +59,6 @@ using namespace std;
 
 // need to make sure that this is int and can divide BATCH_SIZE.
 #define N_QM_COPY_PER_PASS (N_THRD_PER_BLK * 4 / QM_SIZE_BYTE) // 16.
-#define N_FLAG_COPY_PER_PASS (N_THRD_PER_BLK * 4 / FLAG_SIZE_BYTE) // 16.
 
 
 typedef unsigned int WORD;
@@ -173,85 +174,77 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
     double *sm_aggregate = (double *)(sm + BATCH_SIZE_WORD);
     QM *qmArray_sm = (QM *)sm;
     int *flagArray_sm = (int *)(sm + BATCH_QM_SIZE_WORD);
+    double qmArray_local[4 * BATCH_SIZE];
 
     int n_batch = n / BATCH_SIZE;
     if(n_batch * BATCH_SIZE < n) n_batch += 1;
 
-
+    #pragma unroll
     for(int batchId = 0; batchId < n_batch; batchId++){
-
         
-        for(int i = 0; i < BATCH_SIZE; i += N_QM_COPY_PER_PASS){
+        // for(int i = 0; i < BATCH_SIZE; i += N_QM_COPY_PER_PASS){
 
-            int global_offset = batchId * BATCH_QM_SIZE_WORD;
-            int local_offset = i * QM_SIZE_WORD + tid;
-            int idx = global_offset + local_offset;
+        //     int global_offset = batchId * BATCH_QM_SIZE_WORD;
+        //     int local_offset = i * QM_SIZE_WORD + tid;
+        //     int idx = global_offset + local_offset;
 
-            if(idx < n * QM_SIZE_WORD){
-                sm[local_offset] = ((WORD *)qmArray)[idx];
+        //     if(idx < n * QM_SIZE_WORD){
+        //         sm[local_offset] = ((WORD *)qmArray)[idx];
+        //     }
+        // }
+
+        int global_offset = batchId * BATCH_QM_SIZE_DOUBLE;
+
+        #pragma unroll
+        for(int i = 0; i < 4 * BATCH_SIZE; i++){    
+            if(global_offset + i < n * QM_SIZE_DOUBLE){
+                qmArray_local[i] = ((double *)qmArray)[global_offset + i];
             }
         }
 
+        if(threadIdx.x == 0){
 
-
-        // if(threadIdx.x == 0){
-
-        //     int global_offset = batchId * BATCH_SIZE;
-        //     int local_offset = threadIdx.y;
-        //     int idx = global_offset + local_offset;
-
-        //     if(idx < n){
-        //         flagArray_sm[local_offset] = flagArray[idx];
-        //     }            
-        // }
-
-
-        for(int i = 0; i < BATCH_SIZE; i += N_FLAG_COPY_PER_PASS){
-
-            int global_offset = batchId * BATCH_FLAG_SIZE_WORD;
-            int local_offset = i * FLAG_SIZE_WORD + tid;
+            int global_offset = batchId * BATCH_SIZE;
+            int local_offset = threadIdx.y;
             int idx = global_offset + local_offset;
 
-            if(idx < n * FLAG_SIZE_WORD){
+            if(idx < n){
                 flagArray_sm[local_offset] = flagArray[idx];
-            }
+            }            
         }
 
 
         __syncthreads();
 
 
-
-        int n_round = BATCH_SIZE / blockDim.y;
+        int bodyId_other = batchId * BATCH_SIZE + threadIdx.y;
         
-        for(int i = 0; i < n_round; i ++){
-
-            int bodyId_other = batchId * BATCH_SIZE + blockDim.y * i + threadIdx.y;
+        if ((bodyId_other != bodyId_this) && (bodyId_other < n)){
             
-            if ((bodyId_other != bodyId_this) && (bodyId_other < n)){
-                
-                double mj = qmArray_sm[blockDim.y * i + threadIdx.y].m;
-        
-                if (flagArray_sm[blockDim.y * i + threadIdx.y] == 1) {
-                    mj = gravity_device_mass(mj, step * dt);
-                }
-
-                dx = qmArray_sm[blockDim.y * i + threadIdx.y].qx - qx;
-                dy = qmArray_sm[blockDim.y * i + threadIdx.y].qy - qy;
-                dz = qmArray_sm[blockDim.y * i + threadIdx.y].qz - qz;
-
-                double dist3 = pow(dx * dx + dy * dy + dz * dz + eps * eps, 1.5);
-
-                ax += G * mj * dx / dist3;    
-                ay += G * mj * dy / dist3;    
-                az += G * mj * dz / dist3; 
+            double mj = qmArray_local[4 * threadIdx.y + 3]; // m
+     
+            if (flagArray_sm[threadIdx.y] == 1) {
+                mj = gravity_device_mass(mj, step * dt);
             }
-            
+
+            dx = qmArray_local[4 * threadIdx.y + 0] - qx;
+            dy = qmArray_local[4 * threadIdx.y + 1] - qy;
+            dz = qmArray_local[4 * threadIdx.y + 2] - qz;
+
+            // if(bodyId_this == 0) start_time = clock();
+
+            double dist3 = pow(dx * dx + dy * dy + dz * dz + eps * eps, 1.5);
+
+            ax += G * mj * dx / dist3;    
+            ay += G * mj * dy / dist3;    
+            az += G * mj * dz / dist3; 
+
+            // if(bodyId_this == 0){
+            //     stop_time = clock();
+            //     runtime = (int)(stop_time - start_time);
+            //     printf("dt: %d\n", runtime);
+            // } 
         }
-
-
-
-
     }
 
     sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 0] = ax * dt;
