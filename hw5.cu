@@ -40,7 +40,7 @@ using namespace std::chrono;
 using namespace std;
 
 #define N_THRD_PER_BLK_X 4
-#define N_THRD_PER_BLK_Y 32
+#define N_THRD_PER_BLK_Y 256
 #define N_THRD_PER_BLK (N_THRD_PER_BLK_X * N_THRD_PER_BLK_Y)
 
 
@@ -122,36 +122,19 @@ __global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int 
     int runtime = (int)(stop_time - start_time);
 
 
-    // start_time = clock(); 
-    // stop_time = clock();
-    // runtime = (int)(stop_time - start_time);
-    // if(gtid == 0){
-    //     printf("load sm dt: %d\n", runtime);
-    // }
 
-    start_time = clock(); 
-
+   
     if(bodyId_this < n){
 
-        if(threadIdx.y == 0){
-            vx = ((Body *)bodyArray)[bodyId_this].vx;
-            vy = ((Body *)bodyArray)[bodyId_this].vy;
-            vz = ((Body *)bodyArray)[bodyId_this].vz;
-        }
-
+        vx = ((Body *)bodyArray)[bodyId_this].vx;
+        vy = ((Body *)bodyArray)[bodyId_this].vy;
+        vz = ((Body *)bodyArray)[bodyId_this].vz;
+       
         qx = ((Body *)bodyArray)[bodyId_this].qx;
         qy = ((Body *)bodyArray)[bodyId_this].qy;
         qz = ((Body *)bodyArray)[bodyId_this].qz;
     }
 
-    stop_time = clock();
-    runtime = (int)(stop_time - start_time);
-    if(bodyId_this == 0){
-        printf("1 dt: %d\n", runtime);
-    }
-
-
-    start_time = clock();
 
     // update min_dist.
     if((bodyId_this == planetId) && (threadIdx.y == 0)){
@@ -164,20 +147,13 @@ __global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int 
                                 dx * dx + dy * dy + dz * dz);  
     }
 
-    stop_time = clock();
-    runtime = (int)(stop_time - start_time);
-    if(bodyId_this == 0){
-        printf("2 dt: %d\n", runtime);
-    }
-
-
     __shared__ WORD sm[BATCH_SIZE_WORD + N_THRD_PER_BLK_Y * 3 * 2 * N_THRD_PER_BLK_X];
     double *sm_aggregate = (double *)(sm + BATCH_SIZE_WORD);
 
 
     for(int batchId = 0; batchId < n_batch; batchId++){
         
-        start_time = clock();
+   
 
         for(int i = 0; i < BATCH_SIZE; i += N_BODY_COPY_PER_PASS){
 
@@ -190,28 +166,15 @@ __global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int 
             }
         }
 
-        stop_time = clock();
-        runtime = (int)(stop_time - start_time);
-        if(bodyId_this == 0){
-            printf("3 dt: %d\n", runtime);
-        }
-
         __syncthreads();
-
-
-
-
-
-
-        
 
         int bodyId_other = batchId * BATCH_SIZE + threadIdx.y;
         
         if ((bodyId_other != bodyId_this) && (bodyId_other < n)){
             
-            start_time = clock();
 
             double mj = ((Body *)sm)[threadIdx.y].m;
+     
             if (((Body *)sm)[threadIdx.y].isDevice == 1) {
                 mj = gravity_device_mass(mj, step * dt);
             }
@@ -226,47 +189,66 @@ __global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int 
             ay += G * mj * dy / dist3;    
             az += G * mj * dz / dist3; 
 
-            stop_time = clock();
-            runtime = (int)(stop_time - start_time);
-            if(bodyId_this == 0){
-                printf("4 dt: %d\n", runtime);
-            }
-
-
         }
-
-
-
-
-
-
-        
     }
 
-    sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 0] = ax;
-    sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 1] = ay;
-    sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 2] = az;
+    sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 0] = ax * dt;
+    sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 1] = ay * dt;
+    sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 2] = az * dt;
 
     __syncthreads();
 
-    start_time = clock();
 
-    // aggregate 
-    if(threadIdx.y == 0){
+   
+    int binSize = 2;                      // 2, 4, 8
+    while(binSize <= blockDim.y){
 
-        for(int i = 1; i < blockDim.y; i++){
-            ax += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 0];
-            ay += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 1];
-            az += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 2];
+        // printf("binSize: %d\n", binSize);
+
+        if(threadIdx.y % binSize == 0){
+
+            // printf("blockDim.y: %d\n", blockDim.y);
+
+            sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 0] += \
+                sm_aggregate[(threadIdx.y + (binSize >> 1)) * (3 * blockDim.x) \
+                        + 3 * threadIdx.x + 0];
+            
+            sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 1] += \
+                sm_aggregate[(threadIdx.y + (binSize >> 1)) * (3 * blockDim.x) \
+                        + 3 * threadIdx.x + 1];
+            
+            sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 2] += \
+                sm_aggregate[(threadIdx.y + (binSize >> 1)) * (3 * blockDim.x) \
+                        + 3 * threadIdx.x + 2];
+
         }
 
-        vx += ax * dt;
-        vy += ay * dt;
-        vz += az * dt;
+        binSize = binSize << 1;    
+    }
+
+    __syncthreads();
+    
+
+    if(threadIdx.y == 0){
+
+  
+        // for(int i = 0; i < blockDim.y; i++){
+        //     vx += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 0];
+        //     vy += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 1];
+        //     vz += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 2];
+        // }
         
+
+        vx += sm_aggregate[3 * threadIdx.x + 0];
+        vy += sm_aggregate[3 * threadIdx.x + 1];
+        vz += sm_aggregate[3 * threadIdx.x + 2];
+
+     
         qx += vx * dt;
         qy += vy * dt;
         qz += vz * dt; 
+
+
 
         // write back.
         if(bodyId_this < n){
@@ -278,13 +260,11 @@ __global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int 
             ((Body *)bodyArray_update)[bodyId_this].qy = qy;
             ((Body *)bodyArray_update)[bodyId_this].qz = qz; 
         }  
+
+
     }
 
-    stop_time = clock();
-    runtime = (int)(stop_time - start_time);
-    if(bodyId_this == 0){
-        printf("5 dt: %d\n", runtime);
-    }
+
 }
 
 
