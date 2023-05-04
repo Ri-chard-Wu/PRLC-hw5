@@ -17,7 +17,7 @@ using namespace std;
 
 
 
-#define N_BLK 1
+#define N_BLK 64
 #define N_THRD_PER_BLK 32
 
 
@@ -63,10 +63,7 @@ __global__ void kernel2()
 int main(int argc, char **argv)
 {
 
-    cudaStream_t stream[2];
-    for (int i = 0; i < 2; ++i){
-        cudaStreamCreate(&stream[i]);
-    }
+
 
 
     auto start = high_resolution_clock::now();
@@ -89,10 +86,22 @@ int main(int argc, char **argv)
 
     start = high_resolution_clock::now();
 
-    kernel1<<<N_BLK, N_THRD_PER_BLK, 0, stream[0]>>>();
-    kernel2<<<N_BLK, N_THRD_PER_BLK, 0, stream[1]>>>();
+    cudaSetDevice(0);
+    cudaStream_t stream0[2];
+    for (int i = 0; i < 2; ++i) cudaStreamCreate(&stream0[i]);
+    kernel1<<<N_BLK, N_THRD_PER_BLK, 0, stream0[0]>>>();
+    kernel2<<<N_BLK, N_THRD_PER_BLK, 0, stream0[1]>>>();
 
-    cudaDeviceSynchronize();   
+    cudaSetDevice(1);
+    cudaStream_t stream1[2];
+    for (int i = 0; i < 2; ++i) cudaStreamCreate(&stream1[i]);
+    kernel1<<<N_BLK, N_THRD_PER_BLK, 0, stream1[0]>>>();
+    kernel2<<<N_BLK, N_THRD_PER_BLK, 0, stream1[1]>>>();
+
+    for(int i = 0;i<2;i++){
+        cudaDeviceSynchronize();
+    }
+    
 
     stop = high_resolution_clock::now();
     duration = duration_cast<microseconds>(stop - start);
