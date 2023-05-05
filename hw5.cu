@@ -841,6 +841,27 @@ class KCB2{
 };
 
 
+    // kernel_bodyArray_cpy<<<1, 128, 0, stream[0]>>>\
+    //                 (bodyArray1_dev_array[i], bodyArray2_dev_array[i]);
+
+__global__ void kernel_bodyArray_cpy(int n, Body *bodyArray_src, Body *bodyArray_dst){
+
+    int tid = threadIdx.x;
+    int nTrd = blockDim.x;
+    int n_word = n * BODY_SIZE_WORD;
+
+    int n_batch = n_word / nTrd;
+    
+    if(n_batch * nTrd < n_word) n_batch++;
+
+    for(int i = 0; i < n_batch; i++){
+
+        if(i < n_word){
+            bodyArray_dst[i * nTrd + tid] = bodyArray_src[i * nTrd + tid];
+        }
+    }
+    
+}
 
 
 class KCB3{
@@ -916,20 +937,12 @@ class KCB3{
 
     void cpy_h2d_setup_common(){
 
-        // for(int i = 0; i < n_dev; i++){
-        //     cudaMemcpy((BYTE *)bodyArray2_dev_array[i], (BYTE *)(input->bodyArray),
-        //                             input->n * sizeof(Body), cudaMemcpyHostToDevice);            
-        // }
-
-
         for(int i = 0; i < n_dev; i++){
 
-            Body *bodyArray_i_dev = ddckptArray_host[i].bodyArray;
-            int deviceId_i = ddckptArray_host[i].deviceId;
-
-            cudaMemcpy((BYTE *)(bodyArray2_dev_array[i]), ((BYTE *)(bodyArray_i_dev + deviceId_i)) + 48,
-                                    sizeof(double), cudaMemcpyHostToDevice);
-        }                                   
+            kernel_bodyArray_cpy<<<1, 512, 0, stream[0]>>>\
+                            (bodyArray1_dev_array[i], bodyArray2_dev_array[i]);
+        }
+                       
     }
 
     // problem specific
