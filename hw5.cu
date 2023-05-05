@@ -69,6 +69,8 @@ struct Input{
     int asteroidId;
     Body *bodyArray;
     int *id_map;
+
+    int n_dev;
 };
 
 
@@ -95,6 +97,7 @@ void read_input(const char* filename, Input *input) {
 
     input->bodyArray = new Body[input->n];
     input->id_map = new int[input->n];
+    input->n_dev = 0;
 
     string type;
 
@@ -113,6 +116,7 @@ void read_input(const char* filename, Input *input) {
         }
         else{
             input->bodyArray[i].isDevice = 1;
+            input->n_dev++;
         }
 
         input->id_map[i] = i;
@@ -265,22 +269,21 @@ __global__ void kernel_problem1(int step, int n,
     }
 }
 
-
+struct DevDistroyCkpt{
+    int deviceId;
+    int step;
+    Body *bodyArray;
+};
 
 __global__ void kernel_problem2(int step, int n, Body *bodyArray, Body *bodyArray_update, 
-                                BYTE *hit_time_step){
+                                BYTE *hit_time_step, DevDistroyCkpt *ddckptArray, int n_dev){
 
 
 
     if(*((int *)hit_time_step) != -2) return;
         
     int bodyId_this = blockIdx.x * blockDim.x + threadIdx.x;
-    int tid = threadIdx.y * blockDim.x + threadIdx.x;
-
-
-    // if(bodyId_this == 0 && threadIdx.y == 0){
-    //     printf("step: %d\n", step);
-    // }                                    
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;                          
     
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
@@ -291,6 +294,55 @@ __global__ void kernel_problem2(int step, int n, Body *bodyArray, Body *bodyArra
         qy = bodyArray[bodyId_this].qy;
         qz = bodyArray[bodyId_this].qz;
     }
+
+
+    // check missile hit device.
+    if(bodyId_this < n){
+
+        double travel_dist = step * dt * missile_speed;
+
+        for(int i = 0; i < n_dev; i++){
+
+            if(ddckptArray[i].step > 0) continue;
+
+            int deviceId = ddckptArray[i].deviceId;
+
+            dx = bodyArray[0].qx - bodyArray[deviceId].qx;
+            dy = bodyArray[0].qy - bodyArray[deviceId].qy;
+            dz = bodyArray[0].qz - bodyArray[deviceId].qz;
+
+            if (dx * dx + dy * dy + dz * dz < travel_dist * travel_dist){
+
+                // if(bodyId_this == 0 && threadIdx.y == 0){
+                //     printf("deviceId: %d, step: %d\n", deviceId, step);
+                // }
+
+                ddckptArray[i].step = step;
+
+                double vx = bodyArray[bodyId_this].vx;
+                double vy = bodyArray[bodyId_this].vy;
+                double vz = bodyArray[bodyId_this].vz;
+                
+                double m;
+                if(deviceId == bodyId_this){m = 0.;}
+                else{m = bodyArray[bodyId_this].m;}
+
+                long long isDevice = bodyArray[bodyId_this].isDevice;
+                
+                ddckptArray[i].bodyArray[bodyId_this].qx = qx;
+                ddckptArray[i].bodyArray[bodyId_this].qx = qx;
+                ddckptArray[i].bodyArray[bodyId_this].qx = qx;
+                
+                ddckptArray[i].bodyArray[bodyId_this].vx = vx;
+                ddckptArray[i].bodyArray[bodyId_this].vx = vx;
+                ddckptArray[i].bodyArray[bodyId_this].vx = vx;
+
+                ddckptArray[i].bodyArray[bodyId_this].m = m;
+                ddckptArray[i].bodyArray[bodyId_this].isDevice = isDevice;
+            }
+        }
+    }
+    
 
 
 
@@ -702,6 +754,8 @@ class KCB2{
         swapBody(input, input->planetId, 0);
         swapBody(input, input->asteroidId, 1);
 
+        init_ddckptArray();
+
         hit_time_step_host = -2;
 
         double dx = input->bodyArray[0].qx - input->bodyArray[1].qx;
@@ -713,6 +767,32 @@ class KCB2{
         }
 
         cudaMalloc(&hit_time_step_dev, sizeof(int));           
+    }
+
+
+    void init_ddckptArray(){
+        
+        ddckptArray_host = new DevDistroyCkpt[input->n_dev];
+
+        int *deviceIdArray = new int[input->n_dev];
+        int idx = 0;
+        for (int i = 0; i < input->n; i++) {
+            if (input->bodyArray[i].isDevice == 1){
+                deviceIdArray[idx++] = i;
+            }
+        }
+        
+        for(int i = 0; i < input->n_dev; i++){
+            ddckptArray_host[i].deviceId = deviceIdArray[i];
+            ddckptArray_host[i].step = -1;
+            cudaMalloc(&(ddckptArray_host[i].bodyArray), input->n * sizeof(Body)); 
+        }
+
+        cudaMalloc(&ddckptArray_dev, input->n_dev * sizeof(DevDistroyCkpt)); 
+
+        cudaMemcpy((BYTE *)ddckptArray_dev, (BYTE *)ddckptArray_host,
+                        input->n_dev * sizeof(DevDistroyCkpt), cudaMemcpyHostToDevice);        
+
     }
 
     void cpy_h2d_setup_common(){
@@ -755,7 +835,8 @@ class KCB2{
         
 
         kernel_problem2<<<n_block, nThreadsPerBlock, 0, stream>>>\
-                (step, input->n, bodyArray1_dev, bodyArray2_dev, hit_time_step_dev);
+                (step, input->n, bodyArray1_dev, bodyArray2_dev,
+                     hit_time_step_dev, ddckptArray_dev, input->n_dev);
 
         step++;
 
@@ -779,6 +860,7 @@ class KCB2{
     // problem specific
     BYTE *hit_time_step_dev;
     int  hit_time_step_host = -2;
+    DevDistroyCkpt *ddckptArray_dev, *ddckptArray_host;
 };
 
 
