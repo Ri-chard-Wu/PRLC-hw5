@@ -267,13 +267,21 @@ __global__ void kernel_problem1(int step, int n,
 
 
 
-__global__ void kernel_problem2(int step, int n,
-                                Body *bodyArray, Body *bodyArray_update, BYTE *hit_time_step){
+__global__ void kernel_problem2(int step, int n, Body *bodyArray, Body *bodyArray_update, 
+                                BYTE *hit_time_step){
+
+
 
     if(*((int *)hit_time_step) != -2) return;
         
     int bodyId_this = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
+
+
+    // if(bodyId_this == 0 && threadIdx.y == 0){
+    //     printf("step: %d\n", step);
+    // }                                    
+    
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
     double qx, qy, qz;
@@ -372,12 +380,14 @@ __global__ void kernel_problem2(int step, int n,
         double vi = v_ptr[threadIdx.y];
         vi += sm_aggregate[3 * threadIdx.x + threadIdx.y];
 
+        q_ptr_update_sm[threadIdx.y] += vi * dt;
+
         v_ptr_update[threadIdx.y] = vi;
-        q_ptr_update[threadIdx.y] = q_ptr_update_sm[threadIdx.y] + vi * dt;
+        q_ptr_update[threadIdx.y] = q_ptr_update_sm[threadIdx.y];
         
     }
 
-
+    __syncthreads();
 
     if((bodyId_this == 0) && (threadIdx.y == 0)){
 
@@ -387,7 +397,7 @@ __global__ void kernel_problem2(int step, int n,
 
         if (dx * dx + dy * dy + dz * dz < planet_radius * planet_radius) {
             
-            *((int *)hit_time_step) = step - 1; 
+            *((int *)hit_time_step) = step; 
         }
     }
 
@@ -693,6 +703,15 @@ class KCB2{
         swapBody(input, input->asteroidId, 1);
 
         hit_time_step_host = -2;
+
+        double dx = input->bodyArray[0].qx - input->bodyArray[1].qx;
+        double dy = input->bodyArray[0].qy - input->bodyArray[1].qy;
+        double dz = input->bodyArray[0].qz - input->bodyArray[1].qz;
+
+        if (dx * dx + dy * dy + dz * dz < planet_radius * planet_radius) {
+            hit_time_step_host = 0; 
+        }
+
         cudaMalloc(&hit_time_step_dev, sizeof(int));           
     }
 
@@ -733,6 +752,7 @@ class KCB2{
 
     // problem specific
     void one_step(){
+        
 
         kernel_problem2<<<n_block, nThreadsPerBlock, 0, stream>>>\
                 (step, input->n, bodyArray1_dev, bodyArray2_dev, hit_time_step_dev);
