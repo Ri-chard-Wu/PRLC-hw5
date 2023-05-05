@@ -618,8 +618,8 @@ class KCB1{
         bodyArray2_dev = tmp;
     }
 
-    bool is_last_step(){
-        return step == n_steps + 1;
+    bool done(){
+        return step - 1 == n_steps + 1;
     }
 
     int n_block;
@@ -721,8 +721,8 @@ class KCB2{
         bodyArray2_dev = tmp;
     }
 
-    bool is_last_step(){
-        return step == n_steps + 1;
+    bool done(){
+        return step - 1 == n_steps + 1;
     }
 
     int n_block;
@@ -986,54 +986,59 @@ int main(int argc, char **argv)
     // -----------------------------------------------------------
 
 
-    // cudaSetDevice(0);
-
-    // KCB1 kcb1(stream0[0], argv[1]);
-
-    // kcb1.cpy_h2d_setup_common();
-    // kcb1.cpy_h2d_setup();
-
-    // for(int step = 0; step <= n_steps + 1; step++){
-    //     kcb1.one_step();
-    // }
-
-    // kcb1.sync();
-    // kcb1.cpy_d2h_return();
-    
-    // printf("min_dist: %f\n", kcb1.min_dist_host);
-
-
-    // -----------------------------------------------------------
-
-
     cudaSetDevice(0);
 
-    KCB2 kcb2(stream0[0], argv[1]);
+    auto start = high_resolution_clock::now();
+
+    KCB1 kcb1(stream0[0], argv[1]);
+    KCB2 kcb2(stream0[1], argv[1]);
+
+
+    kcb1.cpy_h2d_setup_common();
+    kcb1.cpy_h2d_setup();
 
     kcb2.cpy_h2d_setup_common();
     kcb2.cpy_h2d_setup();
 
+
+
     for(int step = 0; step <= n_steps + 1; step++){
+        
+        kcb1.one_step();
 
-        kcb2.one_step();
+        if(!kcb2.can_break()){
+            
+            kcb2.one_step();
 
-        if((step & (16 - 1)) == 0){
-            if(kcb2.can_break()) break;
-            kcb2.cpy_async_d2h_return();
+            if((step & (16 - 1)) == 0){
+                kcb2.cpy_async_d2h_return();
+            }
         }
     }
+
+
+    // kcb1.sync();
+    cudaDeviceSynchronize();
+
+
+    kcb1.cpy_d2h_return();
+    min_dist = kcb1.min_dist_host;
+    printf("min_dist: %f\n", min_dist);
+
 
     if(kcb2.can_break()){
         hit_time_step = kcb2.hit_time_step_host;
     }else{
-        kcb2.sync();
+        // kcb2.sync();
         kcb2.cpy_d2h_return();
         hit_time_step = kcb2.hit_time_step_host;
     }
-
     printf("hit_time_step: %d\n", hit_time_step);
 
 
+    auto stop = high_resolution_clock::now();
+    auto duration = duration_cast<microseconds>(stop - start);
+    cout<<"problem 1 + 2 time: "<<duration.count() / 1000000. <<" sec"<<endl;
 
 
 
