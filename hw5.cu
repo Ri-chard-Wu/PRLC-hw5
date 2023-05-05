@@ -275,9 +275,10 @@ struct DevDistroyCkpt{
     Body *bodyArray;
 };
 
+
+
 __global__ void kernel_problem2(int step, int n, Body *bodyArray, Body *bodyArray_update, 
                                 BYTE *hit_time_step, DevDistroyCkpt *ddckptArray, int n_dev){
-
 
 
     if(*((int *)hit_time_step) != -2) return;
@@ -458,8 +459,10 @@ __global__ void kernel_problem2(int step, int n, Body *bodyArray, Body *bodyArra
 
 
 
-__global__ void kernel_problem3(int step, int n_batch, int n, int asteroidId,
-            Body *bodyArray, Body *bodyArray_update, BYTE *missile_cost, BYTE *success){
+__global__ void kernel_problem3(int step, int n,
+                        Body *bodyArray, Body *bodyArray_update, BYTE *success){
+
+    if(*((int *)success) == 0) return;
 
 
     int bodyId_this = blockIdx.x * blockDim.x + threadIdx.x;
@@ -474,9 +477,9 @@ __global__ void kernel_problem3(int step, int n_batch, int n, int asteroidId,
         qz = bodyArray[bodyId_this].qz;
     }
 
-    if((bodyId_this == asteroidId) && (threadIdx.y == 0)){
+    // check asteroid hit planet.
+    if((bodyId_this == 1) && (threadIdx.y == 0)){
 
-        // check asteroid hit planet.
         dx = bodyArray[0].qx - qx;
         dy = bodyArray[0].qy - qy;
         dz = bodyArray[0].qz - qz;
@@ -491,6 +494,8 @@ __global__ void kernel_problem3(int step, int n_batch, int n, int asteroidId,
     __shared__ WORD sm[BATCH_SIZE_WORD + N_THRD_PER_BLK_Y * 3 * 2 * N_THRD_PER_BLK_X];
     double *sm_aggregate = (double *)(sm + BATCH_SIZE_WORD);
 
+    int n_batch = n / BATCH_SIZE;
+    if(n_batch * BATCH_SIZE < n) n_batch += 1;
 
     for(int batchId = 0; batchId < n_batch; batchId++){
 
@@ -580,34 +585,6 @@ __global__ void kernel_problem3(int step, int n_batch, int n, int asteroidId,
         q_ptr_update[threadIdx.y] = q_ptr_update_sm[threadIdx.y];
         
     }
-
-    __syncthreads();
-
-    
-    // check missile hit device.
-    if((bodyId_this == 0) && (threadIdx.y == 0)){ 
-
-        if(bodyArray[1].m != 0){
-            
-            dx = q_ptr_update_sm[0] - q_ptr_update_sm[3 + 0];
-            dy = q_ptr_update_sm[1] - q_ptr_update_sm[3 + 1];
-            dz = q_ptr_update_sm[2] - q_ptr_update_sm[3 + 2];
-
-            double travel_dist = (step + 1) * dt * missile_speed;
-
-            if (dx * dx + dy * dy + dz * dz < travel_dist * travel_dist){
-
-                *((double *)missile_cost) = get_missile_cost((step + 1) * dt);
-
-                bodyArray_update[1].m = 0;
-            }
-        }
-        else if(bodyArray_update[1].m != 0){
-            bodyArray_update[1].m = 0;
-        }
-      
-    }
-
 
 }
 
@@ -866,6 +843,131 @@ class KCB2{
 
 
 
+class KCB3{
+
+    public:
+
+    KCB3(cudaStream_t *stream, char* filename, DevDistroyCkpt *ddckptArray_dev, 
+                                            DevDistroyCkpt *ddckptArray_host, int n_dev){
+
+        init_commom(stream, filename);
+
+        // problem specific
+        this->ddckptArray_dev = ddckptArray_dev;
+        this->ddckptArray_host = ddckptArray_host;
+        this->n_dev = n_dev;
+        init();
+    }
+
+    void init_commom(cudaStream_t *stream, char* filename){
+        input = new Input();
+        read_input(filename, input);
+        // step = 1;
+        
+        this->stream = new cudaStream_t[2];
+        this->stream[0] = stream[0];
+        this->stream[1] = stream[1];
+
+        n_block = input->n / N_THRD_PER_BLK_X + 1;
+        nThreadsPerBlock = dim3(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
+
+        // cudaMalloc(&bodyArray2_dev, input->n * sizeof(Body));
+    }
+
+
+    // problem specific
+    void init(){   
+
+        stepArray = new int[n_dev];
+
+        for(int i = 0; i < n_dev; i++){
+            cudaMemcpy((BYTE *)(stepArray + i), ((BYTE *)(ddckptArray_dev)) + \
+                         4 + i * sizeof(DevDistroyCkpt), sizeof(int), cudaMemcpyDeviceToHost);            
+        }
+
+
+        bodyArray1_dev_array = new Body*[n_dev];
+        bodyArray2_dev_array = new Body*[n_dev];
+
+        for(int i = 0; i < n_dev; i++){
+            bodyArray1_dev_array[i] = ddckptArray_host[i].bodyArray;
+            cudaMalloc(&(bodyArray2_dev_array[i]), input->n * sizeof(Body));
+        }                 
+    }
+
+
+    void cpy_h2d_setup_common(){
+
+        for(int i = 0; i < n_dev; i++){
+            cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input->bodyArray),
+                                    input->n * sizeof(Body), cudaMemcpyHostToDevice);
+        }                                   
+    }
+
+    // problem specific
+    void cpy_h2d_setup(){
+   
+        cudaMemcpy(hit_time_step_dev, (BYTE *)&hit_time_step_host,
+                                        sizeof(int), cudaMemcpyHostToDevice);                                        
+    }
+
+    // problem specific
+    bool can_break(){
+        return (hit_time_step_host != -2);
+    }   
+
+    // problem specific
+    void cpy_d2h_return(){
+        cudaMemcpy((BYTE *)&hit_time_step_host, hit_time_step_dev, 
+                                        sizeof(int), cudaMemcpyDeviceToHost);                       
+    }
+
+    // problem specific
+    void cpy_async_d2h_return(){
+        cudaMemcpyAsync((BYTE *)&hit_time_step_host, hit_time_step_dev, 
+                                        sizeof(int), cudaMemcpyDeviceToHost);                   
+    }
+
+    void sync(){
+        cudaDeviceSynchronize();
+    }
+
+    // problem specific
+    void one_step(){
+        
+
+        kernel_problem2<<<n_block, nThreadsPerBlock, 0, stream>>>\
+                (step, input->n, bodyArray1_dev, bodyArray2_dev,
+                     hit_time_step_dev, ddckptArray_dev, input->n_dev);
+
+        step++;
+
+        Body *tmp = bodyArray1_dev;
+        bodyArray1_dev = bodyArray2_dev;
+        bodyArray2_dev = tmp;
+    }
+
+    bool done(){
+        return step - 1 == n_steps;
+    }
+
+    int n_block;
+    dim3 nThreadsPerBlock;
+
+    int *stepArray;
+    Input *input;
+    Body **bodyArray1_dev_array, **bodyArray2_dev_array;
+
+    cudaStream_t stream[2];
+
+    // problem specific
+    BYTE **success_dev_array;
+    DevDistroyCkpt *ddckptArray_dev;
+    DevDistroyCkpt *ddckptArray_host;
+    int n_dev;
+};
+
+
 
 
 
@@ -1059,6 +1161,19 @@ int main(int argc, char **argv)
     }
 
     printf("hit_time_step: %d\n", hit_time_step);
+
+    int step1;
+    cudaMemcpy((BYTE *)(&step1), ((BYTE *)(kcb2.ddckptArray_dev)) + 4 + sizeof(DevDistroyCkpt), 
+                    4, cudaMemcpyDeviceToHost);
+
+    printf("step1: %d\n", step1);
+                    
+    // -----------------------------------------------------------
+
+    // cudaSetDevice(0);
+
+    // KCB3 kcb3(stream0, argv[1], kcb2.ddckptArray_dev, kcb2.ddckptArray_host, kcb2.n_dev);
+
 
 
     // -----------------------------------------------------------
