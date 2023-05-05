@@ -1,2 +1,2 @@
-hw5.cu(567): warning: variable "min_dist_host" was declared but never referenced
+hw5.cu(669): warning: variable "min_dist_host" was declared but never referenced
 

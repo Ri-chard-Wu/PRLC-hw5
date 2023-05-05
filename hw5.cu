@@ -74,6 +74,19 @@ struct Input{
 
 
 
+void swapBody(Input *input, int idx1, int idx2){
+    if(idx1 == idx2) return;
+
+    Body tmpBody = input->bodyArray[idx1];
+    input->bodyArray[idx1] = input->bodyArray[idx2];
+    input->bodyArray[idx2] = tmpBody;
+
+    int tmpId = input->id_map[idx1];
+    input->id_map[idx1] = input->id_map[idx2];
+    input->id_map[idx2] = tmpId;
+}
+
+
 
 void read_input(const char* filename, Input *input) {
 
@@ -108,7 +121,7 @@ void read_input(const char* filename, Input *input) {
 
 
 
-__global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int asteroidId,
+__global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
                                 Body *bodyArray, Body *bodyArray_update, BYTE *min_dist_sq){
 
 
@@ -143,6 +156,9 @@ __global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int 
 
     __shared__ WORD sm[BATCH_SIZE_WORD + N_THRD_PER_BLK_Y * 3 * 2 * N_THRD_PER_BLK_X];
     double *sm_aggregate = (double *)(sm + BATCH_SIZE_WORD);
+
+    int n_batch = n / BATCH_SIZE;
+    if(n_batch * BATCH_SIZE < n) n_batch += 1;
 
 
     for(int batchId = 0; batchId < n_batch; batchId++){
@@ -240,10 +256,6 @@ __global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int 
         
     }
 }
-
-
-
-
 
 
 
@@ -540,12 +552,121 @@ __global__ void kernel_problem3(int step, int n_batch, int n, int asteroidId,
 
 
 
+class KCB1{
+
+    public:
+
+    KCB1(cudaStream_t stream, char* filename){
+
+        init_commom(stream, filename);
+        
+
+        // problem specific
+        init();
+    }
+
+
+    void init_commom(cudaStream_t stream, char* filename){
+        input = new Input();
+        read_input(filename, input);
+        step = 1;
+        this->stream = stream;
+
+        n_block = input->n / N_THRD_PER_BLK_X + 1;
+        nThreadsPerBlock = dim3(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
+
+        cudaMalloc(&bodyArray1_dev, input->n * sizeof(Body));
+        cudaMalloc(&bodyArray2_dev, input->n * sizeof(Body));
+    }
+
+
+    // problem specific
+    void init(){
+        
+        cudaMalloc(&min_dist_sq_dev, sizeof(double));
+        
+        min_dist_sq_host = std::numeric_limits<double>::infinity();
+        
+        for (int i = 0; i < input->n; i++) {
+            if (input->bodyArray[i].isDevice == 1) input->bodyArray[i].m = 0;
+        }        
+    }
+
+
+    void cpy_h2d_setup_common(){
+
+        cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input->bodyArray),
+                                input->n * sizeof(Body), cudaMemcpyHostToDevice);
+
+        cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input->bodyArray),
+                                input->n * sizeof(Body), cudaMemcpyHostToDevice);
+    }
+
+    // problem specific
+    void cpy_h2d_setup(){
+
+        cudaMemcpy(min_dist_sq_dev, (BYTE *)&min_dist_sq_host,
+                                        sizeof(double), cudaMemcpyHostToDevice);
+    }
+
+
+    void cpy_d2h_check(){
+
+    }
+
+    // problem specific
+    void cpy_d2h_return(){
+        cudaMemcpy((BYTE *)&min_dist_sq_host, min_dist_sq_dev, 
+                                        sizeof(double), cudaMemcpyDeviceToHost); 
+        min_dist_host = sqrt(min_dist_sq_host);                       
+    }
+
+    void sync(){
+        cudaDeviceSynchronize();
+    }
+
+    // problem specific
+    void one_step(){
+
+        kernel_problem1<<<n_block, nThreadsPerBlock, 0, stream>>>\
+                (step, input->n, input->planetId, input->asteroidId, 
+                             bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
+              
+        step++;
+
+        Body *tmp = bodyArray1_dev;
+        bodyArray1_dev = bodyArray2_dev;
+        bodyArray2_dev = tmp;
+    }
+
+    bool is_last_step(){
+        return step == n_steps + 1;
+    }
+
+
+    int n_block;
+    dim3 nThreadsPerBlock;
+
+    int step;
+    Input *input;
+    Body *bodyArray1_dev, *bodyArray2_dev;
+    cudaStream_t stream;
+
+    // problem specific
+    BYTE *min_dist_sq_dev;
+    double min_dist_sq_host;
+    double min_dist_host;
+};
+
+
 
 void problem1(cudaStream_t stream, char* filename, double *min_dist_sq_ptr){
 
     Input input;
     Body *bodyArray1_dev, *bodyArray2_dev;
     BYTE *min_dist_sq_dev;
+    double min_dist_sq_host = std::numeric_limits<double>::infinity();
+    double min_dist_host;
 
     read_input(filename, &input);
 
@@ -556,43 +677,33 @@ void problem1(cudaStream_t stream, char* filename, double *min_dist_sq_ptr){
     // cudaSetDevice(0);
 
     cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
+    cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
+    cudaMalloc(&min_dist_sq_dev, sizeof(double));
+
     cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
 
-    cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
     cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
 
-    double min_dist_sq_host = std::numeric_limits<double>::infinity();
-    double min_dist_host;
-
-    cudaMalloc(&min_dist_sq_dev, sizeof(double));
-    cudaMemcpyAsync(min_dist_sq_dev, (BYTE *)&min_dist_sq_host,
+    cudaMemcpy(min_dist_sq_dev, (BYTE *)&min_dist_sq_host,
                                     sizeof(double), cudaMemcpyHostToDevice);
 
     int n_block = input.n / N_THRD_PER_BLK_X + 1;
-    dim3 nThreadsPerBlock(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
+    dim3 nThreadsPerBlock = dim3(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
 
-    int n_batch = input.n / BATCH_SIZE;
-    if(n_batch * BATCH_SIZE < input.n) n_batch += 1;
 
-    // auto start = high_resolution_clock::now();
 
     for (int step = 1; step <= n_steps + 1; step++) {
 
         kernel_problem1<<<n_block, nThreadsPerBlock, 0, stream>>>\
-                (step, n_batch, input.n, input.planetId, input.asteroidId, 
+                (step, input.n, input.planetId, input.asteroidId, 
                              bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
         
         Body *tmp = bodyArray1_dev;
         bodyArray1_dev = bodyArray2_dev;
         bodyArray2_dev = tmp;
     }
-
-
-    // auto stop = high_resolution_clock::now();
-    // auto duration = duration_cast<microseconds>(stop - start);
-    // cout<<"problem 1 time: "<<duration.count() / 1000000. <<" sec"<<endl;
 
     cudaMemcpyAsync((BYTE *)min_dist_sq_ptr, min_dist_sq_dev, 
                                     sizeof(double), cudaMemcpyDeviceToHost);    
@@ -619,7 +730,7 @@ void problem2(cudaStream_t stream, char* filename, int *hit_time_step_ptr){
     int  hit_time_step_host = -2;
  
     cudaMalloc(&hit_time_step_dev, sizeof(int));
-    cudaMemcpyAsync(hit_time_step_dev, (BYTE *)&hit_time_step_host,
+    cudaMemcpy(hit_time_step_dev, (BYTE *)&hit_time_step_host,
                                     sizeof(int), cudaMemcpyHostToDevice);
 
     int n_block = input.n / N_THRD_PER_BLK_X + 1;
@@ -628,10 +739,6 @@ void problem2(cudaStream_t stream, char* filename, int *hit_time_step_ptr){
     int n_batch = input.n / BATCH_SIZE;
     if(n_batch * BATCH_SIZE < input.n) n_batch += 1;
 
-
-
-
-    auto start = high_resolution_clock::now();
 
     for (int step = 1; step <= n_steps + 1; step++) {
 
@@ -646,37 +753,20 @@ void problem2(cudaStream_t stream, char* filename, int *hit_time_step_ptr){
         if((step & (16 - 1)) == 0){
             cudaMemcpyAsync((BYTE *)hit_time_step_ptr, hit_time_step_dev, 
                                             sizeof(int), cudaMemcpyDeviceToHost);
-            // print();
             if(*hit_time_step_ptr != -2) break;
         }
 
     }
-
 
     cudaDeviceSynchronize();
 
     cudaMemcpy((BYTE *)hit_time_step_ptr, hit_time_step_dev, 
                                     sizeof(int), cudaMemcpyDeviceToHost);
 
-    auto stop = high_resolution_clock::now();
-    auto duration = duration_cast<microseconds>(stop - start);
-    cout<<"problem 2 time: "<<duration.count() / 1000000. <<" sec"<<endl;
 
 }
 
 
-
-void swapBody(Input *input, int idx1, int idx2){
-    if(idx1 == idx2) return;
-
-    Body tmpBody = input->bodyArray[idx1];
-    input->bodyArray[idx1] = input->bodyArray[idx2];
-    input->bodyArray[idx2] = tmpBody;
-
-    int tmpId = input->id_map[idx1];
-    input->id_map[idx1] = input->id_map[idx2];
-    input->id_map[idx2] = tmpId;
-}
 
 
 void problem3(cudaStream_t stream, char* filename, int hit_time_step, 
@@ -689,12 +779,8 @@ void problem3(cudaStream_t stream, char* filename, int hit_time_step,
     swapBody(&input, input.planetId, 0);
 
     cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
-    // cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
-    //                         input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
     cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
-    // cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
-    //                         input.n * sizeof(Body), cudaMemcpyHostToDevice);
+
 
     BYTE *missile_cost_dev;
     double missile_cost_host;
@@ -776,12 +862,6 @@ void problem3(cudaStream_t stream, char* filename, int hit_time_step,
                 }
             }
 
-            // cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
-            //                         input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
-            // cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
-            //                         input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
             swapBody(&input, gravity_device_id, 1);
         }
 
@@ -835,24 +915,52 @@ int main(int argc, char **argv)
 
 
 
+    cudaSetDevice(0);
+    
+    KCB1 kcb1(stream0[0], argv[1]);
+
+    kcb1.cpy_h2d_setup_common();
+    kcb1.cpy_h2d_setup();
+
+    for(int step = 0; step <= n_steps + 1; step++){
+        kcb1.one_step();
+    }
+
+    kcb1.sync();
+    kcb1.cpy_d2h_return();
+    
+    printf("min_dist: %f\n", kcb1.min_dist_host);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     // cudaSetDevice(0);
     // problem2(stream0[1], argv[1], &hit_time_step);
     // printf("hit_time_step: %d\n", hit_time_step);
 
 
 
-    hit_time_step = 10;
-    cudaSetDevice(0);
 
-    auto start = high_resolution_clock::now();
 
-    problem3(stream0[1], argv[1], hit_time_step, &gravity_device_id, &missile_cost);
 
-    auto stop = high_resolution_clock::now();
-    auto duration = duration_cast<microseconds>(stop - start);
-    cout<<"problem 3 time: "<<duration.count() / 1000000. <<" sec"<<endl;
-
-    printf("gravity_device_id: %d, missile_cost: %f\n", gravity_device_id, missile_cost);
+    // hit_time_step = 10;
+    // cudaSetDevice(0);
+    // auto start = high_resolution_clock::now();
+    // problem3(stream0[1], argv[1], hit_time_step, &gravity_device_id, &missile_cost);
+    // auto stop = high_resolution_clock::now();
+    // auto duration = duration_cast<microseconds>(stop - start);
+    // cout<<"problem 3 time: "<<duration.count() / 1000000. <<" sec"<<endl;
+    // printf("gravity_device_id: %d, missile_cost: %f\n", gravity_device_id, missile_cost);
   
 
 
