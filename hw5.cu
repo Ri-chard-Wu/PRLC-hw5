@@ -259,7 +259,7 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
 
 
 
-__global__ void kernel_problem2(int step, int n_batch, int n, int planetId, int asteroidId,
+__global__ void kernel_problem2(int step, int n, int planetId, int asteroidId,
                                 Body *bodyArray, Body *bodyArray_update, BYTE *hit_time_step){
 
 
@@ -268,12 +268,6 @@ __global__ void kernel_problem2(int step, int n_batch, int n, int planetId, int 
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
     double qx, qy, qz;
-
-    
-    // clock_t start_time = clock(); 
-    // clock_t stop_time = clock();
-    // int runtime = (int)(stop_time - start_time);
-
    
     if(bodyId_this < n){
         qx = bodyArray[bodyId_this].qx;
@@ -297,10 +291,11 @@ __global__ void kernel_problem2(int step, int n_batch, int n, int planetId, int 
     __shared__ WORD sm[BATCH_SIZE_WORD + N_THRD_PER_BLK_Y * 3 * 2 * N_THRD_PER_BLK_X];
     double *sm_aggregate = (double *)(sm + BATCH_SIZE_WORD);
 
+    int n_batch = n / BATCH_SIZE;
+    if(n_batch * BATCH_SIZE < n) n_batch += 1;
 
     for(int batchId = 0; batchId < n_batch; batchId++){
 
-        
         for(int i = 0; i < BATCH_SIZE; i += N_BODY_COPY_PER_PASS){
 
             int global_offset = batchId * BATCH_SIZE_WORD;
@@ -328,19 +323,12 @@ __global__ void kernel_problem2(int step, int n_batch, int n, int planetId, int 
             dy = ((Body *)sm)[threadIdx.y].qy - qy;
             dz = ((Body *)sm)[threadIdx.y].qz - qz;
 
-            // if(bodyId_this == 0) start_time = clock();
-
             double dist3 = pow(dx * dx + dy * dy + dz * dz + eps * eps, 1.5);
 
             ax += G * mj * dx / dist3;    
             ay += G * mj * dy / dist3;    
             az += G * mj * dz / dist3; 
 
-            // if(bodyId_this == 0){
-            //     stop_time = clock();
-            //     runtime = (int)(stop_time - start_time);
-            //     printf("dt: %d\n", runtime);
-            // } 
         }
     }
 
@@ -351,7 +339,6 @@ __global__ void kernel_problem2(int step, int n_batch, int n, int planetId, int 
     __syncthreads();
 
    
-                      
     for(int binSize = 2; binSize <= blockDim.y; binSize = binSize << 1){
 
         if((threadIdx.y & (binSize - 1)) == 0){
@@ -559,12 +546,10 @@ class KCB1{
     KCB1(cudaStream_t stream, char* filename){
 
         init_commom(stream, filename);
-        
 
         // problem specific
         init();
     }
-
 
     void init_commom(cudaStream_t stream, char* filename){
         input = new Input();
@@ -592,26 +577,20 @@ class KCB1{
         }        
     }
 
-
     void cpy_h2d_setup_common(){
-
         cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input->bodyArray),
                                 input->n * sizeof(Body), cudaMemcpyHostToDevice);
-
         cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input->bodyArray),
                                 input->n * sizeof(Body), cudaMemcpyHostToDevice);
     }
 
     // problem specific
     void cpy_h2d_setup(){
-
         cudaMemcpy(min_dist_sq_dev, (BYTE *)&min_dist_sq_host,
                                         sizeof(double), cudaMemcpyHostToDevice);
     }
 
-
     void cpy_d2h_check(){
-
     }
 
     // problem specific
@@ -643,7 +622,6 @@ class KCB1{
         return step == n_steps + 1;
     }
 
-
     int n_block;
     dim3 nThreadsPerBlock;
 
@@ -660,111 +638,214 @@ class KCB1{
 
 
 
-void problem1(cudaStream_t stream, char* filename, double *min_dist_sq_ptr){
 
-    Input input;
-    Body *bodyArray1_dev, *bodyArray2_dev;
-    BYTE *min_dist_sq_dev;
-    double min_dist_sq_host = std::numeric_limits<double>::infinity();
-    double min_dist_host;
 
-    read_input(filename, &input);
+class KCB2{
 
-    for (int i = 0; i < input.n; i++) {
-        if (input.bodyArray[i].isDevice == 1) input.bodyArray[i].m = 0;
+    public:
+
+    KCB2(cudaStream_t stream, char* filename){
+
+        init_commom(stream, filename);
+
+        // problem specific
+        init();
     }
 
-    // cudaSetDevice(0);
+    void init_commom(cudaStream_t stream, char* filename){
+        input = new Input();
+        read_input(filename, input);
+        step = 1;
+        this->stream = stream;
 
-    cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
-    cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
-    cudaMalloc(&min_dist_sq_dev, sizeof(double));
+        n_block = input->n / N_THRD_PER_BLK_X + 1;
+        nThreadsPerBlock = dim3(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
 
-    cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
-                            input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
-    cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
-                            input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
-    cudaMemcpy(min_dist_sq_dev, (BYTE *)&min_dist_sq_host,
-                                    sizeof(double), cudaMemcpyHostToDevice);
-
-    int n_block = input.n / N_THRD_PER_BLK_X + 1;
-    dim3 nThreadsPerBlock = dim3(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
-
-
-
-    for (int step = 1; step <= n_steps + 1; step++) {
-
-        kernel_problem1<<<n_block, nThreadsPerBlock, 0, stream>>>\
-                (step, input.n, input.planetId, input.asteroidId, 
-                             bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
-        
-        Body *tmp = bodyArray1_dev;
-        bodyArray1_dev = bodyArray2_dev;
-        bodyArray2_dev = tmp;
+        cudaMalloc(&bodyArray1_dev, input->n * sizeof(Body));
+        cudaMalloc(&bodyArray2_dev, input->n * sizeof(Body));
     }
 
-    cudaMemcpyAsync((BYTE *)min_dist_sq_ptr, min_dist_sq_dev, 
-                                    sizeof(double), cudaMemcpyDeviceToHost);    
 
-}
+    // problem specific
+    void init(){   
+        hit_time_step_host = -2;
+        cudaMalloc(&hit_time_step_dev, sizeof(int));           
+    }
 
+    void cpy_h2d_setup_common(){
+        cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input->bodyArray),
+                                input->n * sizeof(Body), cudaMemcpyHostToDevice);
+        cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input->bodyArray),
+                                input->n * sizeof(Body), cudaMemcpyHostToDevice);
+    }
 
-void problem2(cudaStream_t stream, char* filename, int *hit_time_step_ptr){
+    // problem specific
+    void cpy_h2d_setup(){
+   
+        cudaMemcpy(hit_time_step_dev, (BYTE *)&hit_time_step_host,
+                                        sizeof(int), cudaMemcpyHostToDevice);                                        
+    }
 
-    Input input;
-    Body *bodyArray1_dev, *bodyArray2_dev;
-    BYTE *hit_time_step_dev;
+    // problem specific
+    bool can_break(){
+        return (hit_time_step_host != -2);
+    }   
 
-    read_input(filename, &input);
+    // problem specific
+    void cpy_d2h_return(){
+        cudaMemcpy((BYTE *)&hit_time_step_host, hit_time_step_dev, 
+                                        sizeof(int), cudaMemcpyDeviceToHost);                       
+    }
 
-    cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
-    cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
-                            input.n * sizeof(Body), cudaMemcpyHostToDevice);
+    // problem specific
+    void cpy_async_d2h_return(){
+        cudaMemcpyAsync((BYTE *)&hit_time_step_host, hit_time_step_dev, 
+                                        sizeof(int), cudaMemcpyDeviceToHost);                   
+    }
 
-    cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
-    cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
-                            input.n * sizeof(Body), cudaMemcpyHostToDevice);
+    void sync(){
+        cudaDeviceSynchronize();
+    }
 
-    int  hit_time_step_host = -2;
- 
-    cudaMalloc(&hit_time_step_dev, sizeof(int));
-    cudaMemcpy(hit_time_step_dev, (BYTE *)&hit_time_step_host,
-                                    sizeof(int), cudaMemcpyHostToDevice);
-
-    int n_block = input.n / N_THRD_PER_BLK_X + 1;
-    dim3 nThreadsPerBlock(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
-
-    int n_batch = input.n / BATCH_SIZE;
-    if(n_batch * BATCH_SIZE < input.n) n_batch += 1;
-
-
-    for (int step = 1; step <= n_steps + 1; step++) {
+    // problem specific
+    void one_step(){
 
         kernel_problem2<<<n_block, nThreadsPerBlock, 0, stream>>>\
-                (step, n_batch, input.n, input.planetId, input.asteroidId, 
+                (step, input->n, input->planetId, input->asteroidId, 
                              bodyArray1_dev, bodyArray2_dev, hit_time_step_dev);
+
+        step++;
 
         Body *tmp = bodyArray1_dev;
         bodyArray1_dev = bodyArray2_dev;
         bodyArray2_dev = tmp;
-
-        if((step & (16 - 1)) == 0){
-            cudaMemcpyAsync((BYTE *)hit_time_step_ptr, hit_time_step_dev, 
-                                            sizeof(int), cudaMemcpyDeviceToHost);
-            if(*hit_time_step_ptr != -2) break;
-        }
-
     }
 
-    cudaDeviceSynchronize();
+    bool is_last_step(){
+        return step == n_steps + 1;
+    }
 
-    cudaMemcpy((BYTE *)hit_time_step_ptr, hit_time_step_dev, 
-                                    sizeof(int), cudaMemcpyDeviceToHost);
+    int n_block;
+    dim3 nThreadsPerBlock;
+
+    int step;
+    Input *input;
+    Body *bodyArray1_dev, *bodyArray2_dev;
+    cudaStream_t stream;
+
+    // problem specific
+    BYTE *hit_time_step_dev;
+    int  hit_time_step_host = -2;
+};
 
 
-}
+
+
+// void problem1(cudaStream_t stream, char* filename, double *min_dist_sq_ptr){
+
+//     Input input;
+//     Body *bodyArray1_dev, *bodyArray2_dev;
+//     BYTE *min_dist_sq_dev;
+//     double min_dist_sq_host = std::numeric_limits<double>::infinity();
+//     double min_dist_host;
+
+//     read_input(filename, &input);
+
+//     for (int i = 0; i < input.n; i++) {
+//         if (input.bodyArray[i].isDevice == 1) input.bodyArray[i].m = 0;
+//     }
+
+//     // cudaSetDevice(0);
+
+//     cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
+//     cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
+//     cudaMalloc(&min_dist_sq_dev, sizeof(double));
+
+//     cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
+//                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
+
+//     cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
+//                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
+
+//     cudaMemcpy(min_dist_sq_dev, (BYTE *)&min_dist_sq_host,
+//                                     sizeof(double), cudaMemcpyHostToDevice);
+
+//     int n_block = input.n / N_THRD_PER_BLK_X + 1;
+//     dim3 nThreadsPerBlock = dim3(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
+
+
+
+//     for (int step = 1; step <= n_steps + 1; step++) {
+
+//         kernel_problem1<<<n_block, nThreadsPerBlock, 0, stream>>>\
+//                 (step, input.n, input.planetId, input.asteroidId, 
+//                              bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
+        
+//         Body *tmp = bodyArray1_dev;
+//         bodyArray1_dev = bodyArray2_dev;
+//         bodyArray2_dev = tmp;
+//     }
+
+//     cudaMemcpyAsync((BYTE *)min_dist_sq_ptr, min_dist_sq_dev, 
+//                                     sizeof(double), cudaMemcpyDeviceToHost);    
+
+// }
+
+
+// void problem2(cudaStream_t stream, char* filename, int *hit_time_step_ptr){
+
+//     Input input;
+//     Body *bodyArray1_dev, *bodyArray2_dev;
+//     BYTE *hit_time_step_dev;
+
+//     read_input(filename, &input);
+
+//     cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
+//     cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
+//                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
+
+//     cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
+//     cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
+//                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
+
+//     int  hit_time_step_host = -2;
+ 
+//     cudaMalloc(&hit_time_step_dev, sizeof(int));
+//     cudaMemcpy(hit_time_step_dev, (BYTE *)&hit_time_step_host,
+//                                     sizeof(int), cudaMemcpyHostToDevice);
+
+//     int n_block = input.n / N_THRD_PER_BLK_X + 1;
+//     dim3 nThreadsPerBlock(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
+
+//     int n_batch = input.n / BATCH_SIZE;
+//     if(n_batch * BATCH_SIZE < input.n) n_batch += 1;
+
+
+//     for (int step = 1; step <= n_steps + 1; step++) {
+
+//         kernel_problem2<<<n_block, nThreadsPerBlock, 0, stream>>>\
+//                 (step, n_batch, input.n, input.planetId, input.asteroidId, 
+//                              bodyArray1_dev, bodyArray2_dev, hit_time_step_dev);
+
+//         Body *tmp = bodyArray1_dev;
+//         bodyArray1_dev = bodyArray2_dev;
+//         bodyArray2_dev = tmp;
+
+//         if((step & (16 - 1)) == 0){
+//             cudaMemcpyAsync((BYTE *)hit_time_step_ptr, hit_time_step_dev, 
+//                                             sizeof(int), cudaMemcpyDeviceToHost);
+//             if(*hit_time_step_ptr != -2) break;
+//         }
+
+//     }
+
+//     cudaDeviceSynchronize();
+
+//     cudaMemcpy((BYTE *)hit_time_step_ptr, hit_time_step_dev, 
+//                                     sizeof(int), cudaMemcpyDeviceToHost);
+
+
+// }
 
 
 
@@ -902,44 +983,61 @@ int main(int argc, char **argv)
     for (int i = 0; i < 2; ++i) cudaStreamCreate(&stream1[i]);
     
 
-
+    // -----------------------------------------------------------
 
 
     // cudaSetDevice(0);
-    // double min_dist_sq;
-    // problem1(stream0[0], argv[1], &min_dist_sq);
-    // cudaDeviceSynchronize();
-    // min_dist = sqrt(min_dist_sq);
-    // printf("min_dist: %f\n", min_dist);
+
+    // KCB1 kcb1(stream0[0], argv[1]);
+
+    // kcb1.cpy_h2d_setup_common();
+    // kcb1.cpy_h2d_setup();
+
+    // for(int step = 0; step <= n_steps + 1; step++){
+    //     kcb1.one_step();
+    // }
+
+    // kcb1.sync();
+    // kcb1.cpy_d2h_return();
+    
+    // printf("min_dist: %f\n", kcb1.min_dist_host);
 
 
+    // -----------------------------------------------------------
 
 
     cudaSetDevice(0);
-    
-    KCB1 kcb1(stream0[0], argv[1]);
 
-    kcb1.cpy_h2d_setup_common();
-    kcb1.cpy_h2d_setup();
+    KCB2 kcb2(stream0[0], argv[1]);
+
+    kcb2.cpy_h2d_setup_common();
+    kcb2.cpy_h2d_setup();
 
     for(int step = 0; step <= n_steps + 1; step++){
-        kcb1.one_step();
+
+        kcb2.one_step();
+
+        if((step & (16 - 1)) == 0){
+            if(kcb2.can_break()) break;
+            kcb2.cpy_async_d2h_return();
+        }
     }
 
-    kcb1.sync();
-    kcb1.cpy_d2h_return();
-    
-    printf("min_dist: %f\n", kcb1.min_dist_host);
+    if(kcb2.can_break()){
+        hit_time_step = kcb2.hit_time_step_host;
+    }else{
+        kcb2.sync();
+        kcb2.cpy_d2h_return();
+        hit_time_step = kcb2.hit_time_step_host;
+    }
+
+    printf("hit_time_step: %d\n", hit_time_step);
 
 
 
 
 
-
-
-
-
-
+    // -----------------------------------------------------------
 
 
 
