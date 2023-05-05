@@ -892,69 +892,130 @@ class KCB3{
         for(int i = 0; i < n_dev; i++){
             bodyArray1_dev_array[i] = ddckptArray_host[i].bodyArray;
             cudaMalloc(&(bodyArray2_dev_array[i]), input->n * sizeof(Body));
-        }                 
+        }       
+
+        success_dev_array = new BYTE*[n_dev];
+        success_host_array = new int[n_dev];
+        for(int i = 0; i < n_dev; i++){
+            cudaMalloc(&(success_dev_array[i]), sizeof(int));
+            success_host_array[i] = 1;
+        }        
+
+        step_global = 0;
+        for(int i = 0; i < 2; i++) jobIdArray[i] = -1;
+        for(int i = 0; i < min(2, n_dev); i++) jobIdArray[i] = i;
+
+        JobId_next = -1;
+        for(int i = 0; i < 2; i++){
+            if(jobIdArray[i] != -1) JobId_next = jobIdArray[i] + 1;
+        }
+        if(JobId_next == n_dev) JobId_next = -1;
+
     }
 
 
     void cpy_h2d_setup_common(){
 
+        // for(int i = 0; i < n_dev; i++){
+        //     cudaMemcpy((BYTE *)bodyArray2_dev_array[i], (BYTE *)(input->bodyArray),
+        //                             input->n * sizeof(Body), cudaMemcpyHostToDevice);            
+        // }
+
+
         for(int i = 0; i < n_dev; i++){
-            cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input->bodyArray),
-                                    input->n * sizeof(Body), cudaMemcpyHostToDevice);
+
+            Body *bodyArray_i_dev = ddckptArray_host[i].bodyArray;
+            int deviceId_i = ddckptArray_host[i].deviceId;
+
+            cudaMemcpy((BYTE *)(bodyArray2_dev_array[i]), ((BYTE *)(bodyArray_i_dev + deviceId_i)) + 48,
+                                    sizeof(double), cudaMemcpyHostToDevice);
         }                                   
     }
 
     // problem specific
     void cpy_h2d_setup(){
    
-        cudaMemcpy(hit_time_step_dev, (BYTE *)&hit_time_step_host,
-                                        sizeof(int), cudaMemcpyHostToDevice);                                        
+        for(int i = 0; i < n_dev; i++){
+            cudaMemcpy(success_dev_array[i], (BYTE *)&(success_host_array[i]),
+                                            sizeof(int), cudaMemcpyHostToDevice); 
+        }  
     }
 
     // problem specific
-    bool can_break(){
-        return (hit_time_step_host != -2);
-    }   
-
-    // problem specific
-    void cpy_d2h_return(){
-        cudaMemcpy((BYTE *)&hit_time_step_host, hit_time_step_dev, 
-                                        sizeof(int), cudaMemcpyDeviceToHost);                       
+    void cpy_d2h_return(int i){
+        cudaMemcpy((BYTE *)&(success_host_array[i]), success_dev_array[i], 
+                                        sizeof(int), cudaMemcpyDeviceToHost);                  
     }
 
     // problem specific
-    void cpy_async_d2h_return(){
-        cudaMemcpyAsync((BYTE *)&hit_time_step_host, hit_time_step_dev, 
+    void cpy_async_d2h_return(int i){
+        cudaMemcpyAsync((BYTE *)&(success_host_array[i]), success_dev_array[i], 
                                         sizeof(int), cudaMemcpyDeviceToHost);                   
     }
 
-    void sync(){
-        cudaDeviceSynchronize();
+
+    bool all_done(){
+        return ((jobIdArray[0] == -1) && (jobIdArray[1] == -1));
     }
+
+    void replace_job(int streamId){
+
+        jobIdArray[streamId] = JobId_next;
+
+        if(JobId_next != -1){
+
+            JobId_next++;
+            if(JobId_next == n_dev) JobId_next = -1;
+        }
+    }
+
 
     // problem specific
     void one_step(){
         
+        for(int i = 0; i < 2; i ++){
+            
+            int jobId = jobIdArray[i];
+            one_step_stream(i, jobId);
 
-        kernel_problem2<<<n_block, nThreadsPerBlock, 0, stream>>>\
-                (step, input->n, bodyArray1_dev, bodyArray2_dev,
-                     hit_time_step_dev, ddckptArray_dev, input->n_dev);
+            // check early stop
+            if(((step_global) & (16 - 1)) == 0){
+                if(success_host_array[jobId] == 0) replace_job(i);
+                cpy_async_d2h_return(jobId);
+            }              
 
-        step++;
-
-        Body *tmp = bodyArray1_dev;
-        bodyArray1_dev = bodyArray2_dev;
-        bodyArray2_dev = tmp;
+            // check done
+            if(stepArray[jobId] - 1 == n_steps) replace_job(i);
+        }
+  
+        step_global++;
     }
 
-    bool done(){
-        return step - 1 == n_steps;
+
+
+    void one_step_stream(int streamId, int jobId){
+        
+        if(jobId == -1) return;
+
+        kernel_problem3<<<n_block, nThreadsPerBlock, 0, stream[streamId]>>>\
+                (stepArray[jobId], input->n, bodyArray1_dev_array[jobId], bodyArray2_dev_array[jobId],
+                     success_dev_array[jobId]);
+
+        stepArray[jobId]++;
+
+        Body *tmp = bodyArray1_dev_array[jobId];
+        bodyArray1_dev_array[jobId] = bodyArray2_dev_array[jobId];
+        bodyArray2_dev_array[jobId] = tmp;
     }
+
 
     int n_block;
     dim3 nThreadsPerBlock;
+    int jobIdArray[2];
+    int JobId_next;
 
     int *stepArray;
+    int step_global;
     Input *input;
     Body **bodyArray1_dev_array, **bodyArray2_dev_array;
 
@@ -962,6 +1023,7 @@ class KCB3{
 
     // problem specific
     BYTE **success_dev_array;
+    int *success_host_array;
     DevDistroyCkpt *ddckptArray_dev;
     DevDistroyCkpt *ddckptArray_host;
     int n_dev;
