@@ -121,8 +121,9 @@ void read_input(const char* filename, Input *input) {
 
 
 
-__global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
-                                Body *bodyArray, Body *bodyArray_update, BYTE *min_dist_sq){
+
+__global__ void kernel_problem1(int step, int n, 
+                        Body *bodyArray, Body *bodyArray_update, BYTE *min_dist_sq){
 
 
     int bodyId_this = blockIdx.x * blockDim.x + threadIdx.x;
@@ -130,12 +131,6 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
     double qx, qy, qz;
-
-    
-    // clock_t start_time = clock(); 
-    // clock_t stop_time = clock();
-    // int runtime = (int)(stop_time - start_time);
-
    
     if(bodyId_this < n){
         qx = bodyArray[bodyId_this].qx;
@@ -143,16 +138,7 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
         qz = bodyArray[bodyId_this].qz;
     }
 
-    // update min_dist.
-    if((bodyId_this == planetId) && (threadIdx.y == 0)){
 
-        dx = qx - bodyArray[asteroidId].qx;
-        dy = qy - bodyArray[asteroidId].qy;
-        dz = qz - bodyArray[asteroidId].qz;
-
-        *((double *)min_dist_sq) = min(*((double *)min_dist_sq), 
-                                             dx * dx + dy * dy + dz * dz);  
-    }
 
     __shared__ WORD sm[BATCH_SIZE_WORD + N_THRD_PER_BLK_Y * 3 * 2 * N_THRD_PER_BLK_X];
     double *sm_aggregate = (double *)(sm + BATCH_SIZE_WORD);
@@ -163,7 +149,6 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
 
     for(int batchId = 0; batchId < n_batch; batchId++){
 
-        
         for(int i = 0; i < BATCH_SIZE; i += N_BODY_COPY_PER_PASS){
 
             int global_offset = batchId * BATCH_SIZE_WORD;
@@ -182,16 +167,10 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
         if ((bodyId_other != bodyId_this) && (bodyId_other < n)){
             
             double mj = ((Body *)sm)[threadIdx.y].m;
-     
-            if (((Body *)sm)[threadIdx.y].isDevice == 1) {
-                mj = gravity_device_mass(mj, step * dt);
-            }
 
             dx = ((Body *)sm)[threadIdx.y].qx - qx;
             dy = ((Body *)sm)[threadIdx.y].qy - qy;
             dz = ((Body *)sm)[threadIdx.y].qz - qz;
-
-            // if(bodyId_this == 0) start_time = clock();
 
             double dist3 = pow(dx * dx + dy * dy + dz * dz + eps * eps, 1.5);
 
@@ -199,11 +178,6 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
             ay += G * mj * dy / dist3;    
             az += G * mj * dz / dist3; 
 
-            // if(bodyId_this == 0){
-            //     stop_time = clock();
-            //     runtime = (int)(stop_time - start_time);
-            //     printf("dt: %d\n", runtime);
-            // } 
         }
     }
 
@@ -235,15 +209,30 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
         __syncthreads();
     }
 
+    // double dvx = 0, dvy = 0, dvz = 0;
+    // if(threadIdx.y == 0){
+    //     for(int i = 1; i < blockDim.y; i++){
+    //         dvx += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 0];
+    //         dvy += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 1];
+    //         dvz += sm_aggregate[i * (3 * blockDim.x) + 3 * threadIdx.x + 2];
+    //     }
 
+    //     sm_aggregate[3 * threadIdx.x + 0] += dvx;
+    //     sm_aggregate[3 * threadIdx.x + 1] += dvy;
+    //     sm_aggregate[3 * threadIdx.x + 2] += dvz;
+    // }
+
+
+
+
+    double *q_ptr_update_sm = sm_aggregate + (3 * blockDim.x + 3 * threadIdx.x);
 
     if((threadIdx.y < 3) && (bodyId_this < n)){
         
         double *v_ptr = (double *)&(bodyArray[bodyId_this].vx);
         double *q_ptr_update = (double *)&(bodyArray_update[bodyId_this].qx);
         double *v_ptr_update = (double *)&(bodyArray_update[bodyId_this].vx);
-        double *q_ptr_update_sm = sm_aggregate + (3 * blockDim.x + 3 * threadIdx.x);
-   
+        
         q_ptr_update_sm[0] = qx;
         q_ptr_update_sm[1] = qy;
         q_ptr_update_sm[2] = qz;
@@ -251,9 +240,28 @@ __global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
         double vi = v_ptr[threadIdx.y];
         vi += sm_aggregate[3 * threadIdx.x + threadIdx.y];
 
+        q_ptr_update_sm[threadIdx.y] += vi * dt;
+
         v_ptr_update[threadIdx.y] = vi;
-        q_ptr_update[threadIdx.y] = q_ptr_update_sm[threadIdx.y] + vi * dt;
+        q_ptr_update[threadIdx.y] = q_ptr_update_sm[threadIdx.y];
         
+    }
+
+    __syncthreads();
+
+
+    if((bodyId_this == 0) && (threadIdx.y == 0)){
+
+        dx = q_ptr_update_sm[0] - q_ptr_update_sm[3 + 0];
+        dy = q_ptr_update_sm[1] - q_ptr_update_sm[3 + 1];
+        dz = q_ptr_update_sm[2] - q_ptr_update_sm[3 + 2];
+
+        double min_dist_sq_local = *((double *)min_dist_sq);
+        double r_sq = dx * dx + dy * dy + dz * dz;
+
+        if(min_dist_sq_local > r_sq){
+            *((double *)min_dist_sq) = r_sq;
+        }  
     }
 }
 
@@ -552,8 +560,10 @@ class KCB1{
     }
 
     void init_commom(cudaStream_t stream, char* filename){
+        
         input = new Input();
         read_input(filename, input);
+        
         step = 1;
         this->stream = stream;
 
@@ -567,10 +577,17 @@ class KCB1{
 
     // problem specific
     void init(){
-        
+
+        swapBody(input, input->planetId, 0);
+        swapBody(input, input->asteroidId, 1);
+
         cudaMalloc(&min_dist_sq_dev, sizeof(double));
         
-        min_dist_sq_host = std::numeric_limits<double>::infinity();
+        double dx = input->bodyArray[0].qx - input->bodyArray[1].qx;
+        double dy = input->bodyArray[0].qy - input->bodyArray[1].qy;
+        double dz = input->bodyArray[0].qz - input->bodyArray[1].qz;
+
+        min_dist_sq_host = dx * dx + dy * dy + dz * dz; 
         
         for (int i = 0; i < input->n; i++) {
             if (input->bodyArray[i].isDevice == 1) input->bodyArray[i].m = 0;
@@ -608,8 +625,7 @@ class KCB1{
     void one_step(){
 
         kernel_problem1<<<n_block, nThreadsPerBlock, 0, stream>>>\
-                (step, input->n, input->planetId, input->asteroidId, 
-                             bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
+                (step, input->n, bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
               
         step++;
 
@@ -619,7 +635,7 @@ class KCB1{
     }
 
     bool done(){
-        return step - 1 == n_steps + 1;
+        return step - 1 == n_steps;
     }
 
     int n_block;
@@ -741,78 +757,32 @@ class KCB2{
 
 
 
-// void problem1(cudaStream_t stream, char* filename, double *min_dist_sq_ptr){
+
+
+
+
+// void problem3(cudaStream_t stream, char* filename, int hit_time_step, 
+//                                         int *gravity_device_id_ptr, double *missile_cost_ptr){
 
 //     Input input;
 //     Body *bodyArray1_dev, *bodyArray2_dev;
-//     BYTE *min_dist_sq_dev;
-//     double min_dist_sq_host = std::numeric_limits<double>::infinity();
-//     double min_dist_host;
 
 //     read_input(filename, &input);
-
-//     for (int i = 0; i < input.n; i++) {
-//         if (input.bodyArray[i].isDevice == 1) input.bodyArray[i].m = 0;
-//     }
-
-//     // cudaSetDevice(0);
+//     swapBody(&input, input.planetId, 0);
 
 //     cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
 //     cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
-//     cudaMalloc(&min_dist_sq_dev, sizeof(double));
-
-//     cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
-//                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
-//     cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
-//                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
-//     cudaMemcpy(min_dist_sq_dev, (BYTE *)&min_dist_sq_host,
-//                                     sizeof(double), cudaMemcpyHostToDevice);
-
-//     int n_block = input.n / N_THRD_PER_BLK_X + 1;
-//     dim3 nThreadsPerBlock = dim3(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
 
 
+//     BYTE *missile_cost_dev;
+//     double missile_cost_host;
+//     cudaMalloc(&missile_cost_dev, sizeof(double));
 
-//     for (int step = 1; step <= n_steps + 1; step++) {
-
-//         kernel_problem1<<<n_block, nThreadsPerBlock, 0, stream>>>\
-//                 (step, input.n, input.planetId, input.asteroidId, 
-//                              bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
-        
-//         Body *tmp = bodyArray1_dev;
-//         bodyArray1_dev = bodyArray2_dev;
-//         bodyArray2_dev = tmp;
-//     }
-
-//     cudaMemcpyAsync((BYTE *)min_dist_sq_ptr, min_dist_sq_dev, 
-//                                     sizeof(double), cudaMemcpyDeviceToHost);    
-
-// }
+//     BYTE *success_dev;
+//     int success_host;
+//     cudaMalloc(&success_dev, sizeof(int));
 
 
-// void problem2(cudaStream_t stream, char* filename, int *hit_time_step_ptr){
-
-//     Input input;
-//     Body *bodyArray1_dev, *bodyArray2_dev;
-//     BYTE *hit_time_step_dev;
-
-//     read_input(filename, &input);
-
-//     cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
-//     cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
-//                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
-//     cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
-//     cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
-//                             input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
-//     int  hit_time_step_host = -2;
- 
-//     cudaMalloc(&hit_time_step_dev, sizeof(int));
-//     cudaMemcpy(hit_time_step_dev, (BYTE *)&hit_time_step_host,
-//                                     sizeof(int), cudaMemcpyHostToDevice);
 
 //     int n_block = input.n / N_THRD_PER_BLK_X + 1;
 //     dim3 nThreadsPerBlock(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
@@ -821,146 +791,87 @@ class KCB2{
 //     if(n_batch * BATCH_SIZE < input.n) n_batch += 1;
 
 
-//     for (int step = 1; step <= n_steps + 1; step++) {
+//     int gravity_device_id_min = -1;
+//     double missile_cost_min = std::numeric_limits<double>::infinity();
 
-//         kernel_problem2<<<n_block, nThreadsPerBlock, 0, stream>>>\
-//                 (step, n_batch, input.n, input.planetId, input.asteroidId, 
-//                              bodyArray1_dev, bodyArray2_dev, hit_time_step_dev);
 
-//         Body *tmp = bodyArray1_dev;
-//         bodyArray1_dev = bodyArray2_dev;
-//         bodyArray2_dev = tmp;
+//     if(hit_time_step != -2){
 
-//         if((step & (16 - 1)) == 0){
-//             cudaMemcpyAsync((BYTE *)hit_time_step_ptr, hit_time_step_dev, 
+//         for(int i = 0; i < input.n; i++){
+
+//             if(input.bodyArray[i].isDevice != 1) continue;
+//             if(input.bodyArray[i].m == 0) continue;
+
+//             int gravity_device_id = i;
+//             swapBody(&input, gravity_device_id, 1);
+
+
+//             success_host = 1;
+//             cudaMemcpy(success_dev, (BYTE *)&success_host,
+//                                 sizeof(int), cudaMemcpyHostToDevice);            
+
+//             cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
+//                                     input.n * sizeof(Body), cudaMemcpyHostToDevice);
+
+//             cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
+//                                     input.n * sizeof(Body), cudaMemcpyHostToDevice);
+
+
+//             for (int step = 1; step <= n_steps + 1; step++) {
+
+//                 kernel_problem3<<<n_block, nThreadsPerBlock, 0, stream>>>\
+//                         (step, n_batch, input.n, input.asteroidId, 
+//                         bodyArray1_dev, bodyArray2_dev, missile_cost_dev, success_dev);
+
+
+//                 if((step & (16 - 1)) == 0){
+//                     cudaMemcpyAsync((BYTE *)&success_host, success_dev, 
+//                                                     sizeof(int), cudaMemcpyDeviceToHost);
+
+//                     if(success_host != 1) break;
+//                 } 
+
+//                 Body *tmp = bodyArray1_dev;
+//                 bodyArray1_dev = bodyArray2_dev;
+//                 bodyArray2_dev = tmp;
+               
+                
+//             }
+
+//             cudaDeviceSynchronize();
+
+//             cudaMemcpy((BYTE *)&success_host, success_dev, 
 //                                             sizeof(int), cudaMemcpyDeviceToHost);
-//             if(*hit_time_step_ptr != -2) break;
+//             cudaMemcpy((BYTE *)&missile_cost_host, missile_cost_dev, 
+//                                             sizeof(double), cudaMemcpyDeviceToHost);
+
+
+            
+//             if(success_host == 1){
+//                 if(missile_cost_host < missile_cost_min){                   
+//                     missile_cost_min = missile_cost_host;
+//                     gravity_device_id_min = gravity_device_id;
+//                 }
+//             }
+
+//             swapBody(&input, gravity_device_id, 1);
 //         }
 
 //     }
 
-//     cudaDeviceSynchronize();
 
-//     cudaMemcpy((BYTE *)hit_time_step_ptr, hit_time_step_dev, 
-//                                     sizeof(int), cudaMemcpyDeviceToHost);
+                            
+//     if(gravity_device_id_min == -1){
+//         *gravity_device_id_ptr = -1;
+//         *missile_cost_ptr = 0;
+//     }
+//     else{  
+//         *gravity_device_id_ptr = gravity_device_id_min;
+//         *missile_cost_ptr = missile_cost_min;
+//     }
 
 
 // }
-
-
-
-
-void problem3(cudaStream_t stream, char* filename, int hit_time_step, 
-                                        int *gravity_device_id_ptr, double *missile_cost_ptr){
-
-    Input input;
-    Body *bodyArray1_dev, *bodyArray2_dev;
-
-    read_input(filename, &input);
-    swapBody(&input, input.planetId, 0);
-
-    cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
-    cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
-
-
-    BYTE *missile_cost_dev;
-    double missile_cost_host;
-    cudaMalloc(&missile_cost_dev, sizeof(double));
-
-    BYTE *success_dev;
-    int success_host;
-    cudaMalloc(&success_dev, sizeof(int));
-
-
-
-    int n_block = input.n / N_THRD_PER_BLK_X + 1;
-    dim3 nThreadsPerBlock(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
-
-    int n_batch = input.n / BATCH_SIZE;
-    if(n_batch * BATCH_SIZE < input.n) n_batch += 1;
-
-
-    int gravity_device_id_min = -1;
-    double missile_cost_min = std::numeric_limits<double>::infinity();
-
-
-    if(hit_time_step != -2){
-
-        for(int i = 0; i < input.n; i++){
-
-            if(input.bodyArray[i].isDevice != 1) continue;
-            if(input.bodyArray[i].m == 0) continue;
-
-            int gravity_device_id = i;
-            swapBody(&input, gravity_device_id, 1);
-
-
-            success_host = 1;
-            cudaMemcpy(success_dev, (BYTE *)&success_host,
-                                sizeof(int), cudaMemcpyHostToDevice);            
-
-            cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
-                                    input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
-            cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
-                                    input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
-
-            for (int step = 1; step <= n_steps + 1; step++) {
-
-                kernel_problem3<<<n_block, nThreadsPerBlock, 0, stream>>>\
-                        (step, n_batch, input.n, input.asteroidId, 
-                        bodyArray1_dev, bodyArray2_dev, missile_cost_dev, success_dev);
-
-
-                if((step & (16 - 1)) == 0){
-                    cudaMemcpyAsync((BYTE *)&success_host, success_dev, 
-                                                    sizeof(int), cudaMemcpyDeviceToHost);
-
-                    if(success_host != 1) break;
-                } 
-
-                Body *tmp = bodyArray1_dev;
-                bodyArray1_dev = bodyArray2_dev;
-                bodyArray2_dev = tmp;
-               
-                
-            }
-
-            cudaDeviceSynchronize();
-
-            cudaMemcpy((BYTE *)&success_host, success_dev, 
-                                            sizeof(int), cudaMemcpyDeviceToHost);
-            cudaMemcpy((BYTE *)&missile_cost_host, missile_cost_dev, 
-                                            sizeof(double), cudaMemcpyDeviceToHost);
-
-
-            
-            if(success_host == 1){
-                if(missile_cost_host < missile_cost_min){                   
-                    missile_cost_min = missile_cost_host;
-                    gravity_device_id_min = gravity_device_id;
-                }
-            }
-
-            swapBody(&input, gravity_device_id, 1);
-        }
-
-    }
-
-
-                            
-    if(gravity_device_id_min == -1){
-        *gravity_device_id_ptr = -1;
-        *missile_cost_ptr = 0;
-    }
-    else{  
-        *gravity_device_id_ptr = gravity_device_id_min;
-        *missile_cost_ptr = missile_cost_min;
-    }
-
-
-}
 
 
 
@@ -988,58 +899,57 @@ int main(int argc, char **argv)
 
     cudaSetDevice(0);
 
-    auto start = high_resolution_clock::now();
-
     KCB1 kcb1(stream0[0], argv[1]);
-    KCB2 kcb2(stream0[1], argv[1]);
-
 
     kcb1.cpy_h2d_setup_common();
     kcb1.cpy_h2d_setup();
 
-    kcb2.cpy_h2d_setup_common();
-    kcb2.cpy_h2d_setup();
+    auto start = high_resolution_clock::now();
 
-
-
-    for(int step = 0; step <= n_steps + 1; step++){
-        
+    for(int step = 1; step <= n_steps; step++){
         kcb1.one_step();
-
-        if(!kcb2.can_break()){
-            
-            kcb2.one_step();
-
-            if((step & (16 - 1)) == 0){
-                kcb2.cpy_async_d2h_return();
-            }
-        }
     }
 
-
-    // kcb1.sync();
-    cudaDeviceSynchronize();
-
-
+    kcb1.sync();
     kcb1.cpy_d2h_return();
-    min_dist = kcb1.min_dist_host;
-    printf("min_dist: %f\n", min_dist);
-
-
-    if(kcb2.can_break()){
-        hit_time_step = kcb2.hit_time_step_host;
-    }else{
-        // kcb2.sync();
-        kcb2.cpy_d2h_return();
-        hit_time_step = kcb2.hit_time_step_host;
-    }
-    printf("hit_time_step: %d\n", hit_time_step);
-
-
+    
     auto stop = high_resolution_clock::now();
     auto duration = duration_cast<microseconds>(stop - start);
-    cout<<"problem 1 + 2 time: "<<duration.count() / 1000000. <<" sec"<<endl;
+    cout<<"problem 1 time: "<<duration.count() / 1000000. <<" sec"<<endl;
 
+
+    printf("min_dist: %f\n", kcb1.min_dist_host);
+
+
+    // -----------------------------------------------------------
+
+
+    // cudaSetDevice(0);
+
+    // KCB2 kcb2(stream0[0], argv[1]);
+
+    // kcb2.cpy_h2d_setup_common();
+    // kcb2.cpy_h2d_setup();
+
+    // for(int step = 0; step <= n_steps + 1; step++){
+
+    //     kcb2.one_step();
+
+    //     if((step & (16 - 1)) == 0){
+    //         if(kcb2.can_break()) break;
+    //         kcb2.cpy_async_d2h_return();
+    //     }
+    // }
+
+    // if(kcb2.can_break()){
+    //     hit_time_step = kcb2.hit_time_step_host;
+    // }else{
+    //     kcb2.sync();
+    //     kcb2.cpy_d2h_return();
+    //     hit_time_step = kcb2.hit_time_step_host;
+    // }
+
+    // printf("hit_time_step: %d\n", hit_time_step);
 
 
     // -----------------------------------------------------------
