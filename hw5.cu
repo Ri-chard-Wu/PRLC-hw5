@@ -6,8 +6,13 @@
 #include <cstring>
 #include <cassert>
 #include <chrono>
-#include <algorithm>
-#include <vector>
+
+#include <cmath>           
+#include <iomanip>           
+#include <limits>           
+#include <stdexcept>           
+#include <string>           
+
 
 
 
@@ -32,6 +37,16 @@ double gravity_device_mass(double m0, double t) {
 __host__ __device__ 
 double get_missile_cost(double t) {
     return 1e5 + 1e3 * t; 
+}
+
+void write_output(const char* filename, double min_dist, int hit_time_step,
+    int gravity_device_id, double missile_cost) {
+    std::ofstream fout(filename);
+    fout << std::scientific
+         << std::setprecision(std::numeric_limits<double>::digits10 + 1) << min_dist
+         << '\n'
+         << hit_time_step << '\n'
+         << gravity_device_id << ' ' << missile_cost << '\n';
 }
 
 
@@ -277,8 +292,11 @@ struct DevDistroyCkpt{
 
 
 
+
+
 __global__ void kernel_problem2(int step, int n, Body *bodyArray, Body *bodyArray_update, 
-                                BYTE *hit_time_step, DevDistroyCkpt *ddckptArray, int n_dev){
+                BYTE *hit_time_step, DevDistroyCkpt *ddckptArray, int n_dev, 
+                int *ddckptOk_src, int *ddckptOk_dst){
 
 
     if(*((int *)hit_time_step) != -2) return;
@@ -304,7 +322,10 @@ __global__ void kernel_problem2(int step, int n, Body *bodyArray, Body *bodyArra
 
         for(int i = 0; i < n_dev; i++){
 
-            if(ddckptArray[i].step > 0) continue;
+            if(ddckptOk_src[i] == 1){
+                if(ddckptOk_dst[i] != 1) ddckptOk_dst[i] = 1;
+                continue;
+            } 
 
             int deviceId = ddckptArray[i].deviceId;
 
@@ -319,6 +340,7 @@ __global__ void kernel_problem2(int step, int n, Body *bodyArray, Body *bodyArra
                 // }
 
                 ddckptArray[i].step = step;
+                ddckptOk_dst[i] = 1;
 
                 double vx = bodyArray[bodyId_this].vx;
                 double vy = bodyArray[bodyId_this].vy;
@@ -331,15 +353,22 @@ __global__ void kernel_problem2(int step, int n, Body *bodyArray, Body *bodyArra
                 long long isDevice = bodyArray[bodyId_this].isDevice;
                 
                 ddckptArray[i].bodyArray[bodyId_this].qx = qx;
-                ddckptArray[i].bodyArray[bodyId_this].qx = qx;
-                ddckptArray[i].bodyArray[bodyId_this].qx = qx;
+                ddckptArray[i].bodyArray[bodyId_this].qy = qy;
+                ddckptArray[i].bodyArray[bodyId_this].qz = qz;
                 
                 ddckptArray[i].bodyArray[bodyId_this].vx = vx;
-                ddckptArray[i].bodyArray[bodyId_this].vx = vx;
-                ddckptArray[i].bodyArray[bodyId_this].vx = vx;
+                ddckptArray[i].bodyArray[bodyId_this].vy = vy;
+                ddckptArray[i].bodyArray[bodyId_this].vz = vz;
 
                 ddckptArray[i].bodyArray[bodyId_this].m = m;
                 ddckptArray[i].bodyArray[bodyId_this].isDevice = isDevice;
+                
+                // if(bodyId_this == 0 && threadIdx.y == 0){
+                //     printf("[p2] qx, qy, qz, m: %f, %f, %f, %f\n", ddckptArray[i].bodyArray[19].vx, 
+                //                                             ddckptArray[i].bodyArray[19].vy, 
+                //                                             ddckptArray[i].bodyArray[19].vz,
+                //                                             ddckptArray[i].bodyArray[19].m);
+                // }
             }
         }
     }
@@ -465,8 +494,17 @@ __global__ void kernel_problem3(int step, int n,
     if(*((int *)success) == 0) return;
 
 
+
     int bodyId_this = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
+
+    // if(bodyId_this == 0 && threadIdx.y == 0){
+    //     printf("[p3] qx, qy, qz, m: %f, %f, %f, %f\n", bodyArray[19].vx, 
+    //                                             bodyArray[19].vy, 
+    //                                             bodyArray[19].vz,
+    //                                             bodyArray[19].m);
+    //     *((int *)success) = 0;
+    // }
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
     double qx, qy, qz;
@@ -484,10 +522,19 @@ __global__ void kernel_problem3(int step, int n,
         dy = bodyArray[0].qy - qy;
         dz = bodyArray[0].qz - qz;
 
+       
         if (dx * dx + dy * dy + dz * dz < planet_radius * planet_radius) {
+
+            printf("hit\n");
+
             *((int *)success) = 0;
         }
     }
+
+    // if(bodyId_this == 0 && threadIdx.y == 0){
+    //     printf("success: %d\n", *((int *)success));
+    // }
+
 
 
 
@@ -754,7 +801,20 @@ class KCB2{
             hit_time_step_host = 0; 
         }
 
-        cudaMalloc(&hit_time_step_dev, sizeof(int));           
+        cudaMalloc(&hit_time_step_dev, sizeof(int));    
+
+
+
+        cudaMalloc(&ddckptOk1_dev, input->n_dev * sizeof(int));
+        cudaMalloc(&ddckptOk2_dev, input->n_dev * sizeof(int));
+        ddckptOk_host = new int[input->n_dev];
+        for(int i = 0; i < input->n_dev; i++){
+            ddckptOk_host[i] = -1;
+        }
+        cudaMemcpy((BYTE *)ddckptOk1_dev, (BYTE *)ddckptOk_host,
+                                input->n_dev * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy((BYTE *)ddckptOk2_dev, (BYTE *)ddckptOk_host,
+                                input->n_dev * sizeof(int), cudaMemcpyHostToDevice);                                         
     }
 
 
@@ -823,6 +883,10 @@ class KCB2{
                         input->n_dev * sizeof(DevDistroyCkpt), cudaMemcpyDeviceToHost);
     }
 
+    void syncStream(){
+        cudaSetDevice(gpuId);
+        cudaStreamSynchronize(stream);
+    }
 
     // problem specific
     void one_step(){
@@ -834,13 +898,18 @@ class KCB2{
 
         kernel_problem2<<<n_block, nThreadsPerBlock, 0, stream>>>\
                 (step, input->n, bodyArray1_dev, bodyArray2_dev,
-                     hit_time_step_dev, ddckptArray_dev, input->n_dev);
+                     hit_time_step_dev, ddckptArray_dev, input->n_dev,
+                     ddckptOk1_dev, ddckptOk2_dev);
 
         step++;
 
-        Body *tmp = bodyArray1_dev;
+        Body *tmpBody = bodyArray1_dev;
         bodyArray1_dev = bodyArray2_dev;
-        bodyArray2_dev = tmp;
+        bodyArray2_dev = tmpBody;
+
+        int *tmpInt = ddckptOk1_dev;
+        ddckptOk1_dev = ddckptOk2_dev;
+        ddckptOk2_dev = tmpInt;
     }
 
 
@@ -864,6 +933,7 @@ class KCB2{
     BYTE *hit_time_step_dev;
     int  hit_time_step_host = -2;
     DevDistroyCkpt *ddckptArray_dev, *ddckptArray_host;
+    int *ddckptOk1_dev, *ddckptOk2_dev, *ddckptOk_host;
 };
 
 
@@ -873,6 +943,7 @@ __global__ void kernel_bodyArray_cpy(int n, Body *bodyArray_src, Body *bodyArray
 
     int tid = threadIdx.x;
     int nTrd = blockDim.x;
+    // printf("tid: %d\n", tid);
     int n_word = n * BODY_SIZE_WORD;
 
     int n_batch = n_word / nTrd;
@@ -881,8 +952,8 @@ __global__ void kernel_bodyArray_cpy(int n, Body *bodyArray_src, Body *bodyArray
 
     for(int i = 0; i < n_batch; i++){
 
-        if(i < n_word){
-            bodyArray_dst[i * nTrd + tid] = bodyArray_src[i * nTrd + tid];
+        if(i * nTrd + tid < n_word){
+            ((WORD *)bodyArray_dst)[i * nTrd + tid] = ((WORD *)bodyArray_src)[i * nTrd + tid];
         }
     }
 }
@@ -957,7 +1028,7 @@ class KCB3{
 
 
     void check_new_job(){
-        
+
         for(int i = 0; i < n_dev; i++){
 
             if(stepArray[i] != -1) continue;
@@ -966,6 +1037,7 @@ class KCB3{
             stepArray[i] = kcb2->ddckptArray_host[i].step;
             ddstepArray[i] = kcb2->ddckptArray_host[i].step;
             cpy_h2d_setup(i, streamId_next);
+            jobStrmId[i] = streamId_next;
             streamId_next = (streamId_next + 1) % n_stream;
         }
     }
@@ -989,7 +1061,7 @@ class KCB3{
     bool done(){
         bool done = true;
         for(int i = 0; i < n_dev; i ++) done = done && done_job(i);
-        return done;
+        return (done || ((kcb2->done()) && (kcb2->hit_time_step_host == -2)));
     }
 
 
@@ -999,19 +1071,29 @@ class KCB3{
 
 
     void one_step(){
-        
+
+        // if(kcb2->done() && kcb2->hit_time_step_host == -2) return;
+
+
+
         for(int i = 0; i < n_dev; i ++){
             
             if(stepArray[i] == -1) continue;
             if(done_job(i)) continue;
 
+
+            // printf("jobId/n_dev: %d / %d\n", i, n_dev);
+            // printf("step: %d\n", stepArray[i]);
+            // printf("success_host_array[jobId]: %d\n", success_host_array[i]);
+            // printf("\n-------------------------\n");
+            
+
             cudaSetDevice(gpuId);
 
-            kernel_problem3<<<n_block, nThreadsPerBlock, 0, stream[streamId_next]>>>\
+            kernel_problem3<<<n_block, nThreadsPerBlock, 0, stream[jobStrmId[i]]>>>\
                     (stepArray[i], input->n, bodyArray1_dev_array[i], bodyArray2_dev_array[i],
                         success_dev_array[i]);
 
-            streamId_next = (streamId_next + 1) % n_stream;
             stepArray[i]++;
 
             Body *tmp = bodyArray1_dev_array[i];
@@ -1024,6 +1106,7 @@ class KCB3{
 
 
     void process_return(){
+
 
         int min_step = n_steps + 1;
         gravity_device_id = -1;
@@ -1059,6 +1142,7 @@ class KCB3{
     int streamId_next = 0;
     cudaStream_t stream[4];
     int n_stream = 4;
+    int jobStrmId[4];
 
     // problem specific
     KCB2 *kcb2;
@@ -1103,12 +1187,21 @@ int main(int argc, char **argv)
     KCB3 kcb3(0, &kcb2);
 
 
-
+    int cnt = 0;
     while((!kcb1.done()) || (!kcb2.done()) || (!kcb3.done())){
+
         kcb1.one_step();
         kcb2.one_step();
-        kcb3.check_new_job();  
-        kcb3.one_step();      
+        
+        if((cnt & (16 - 1)) == 0){
+            kcb2.syncStream();
+            kcb2.cpy_d2h_return();
+            kcb3.check_new_job(); 
+        }
+
+        kcb3.one_step();   
+
+        cnt++;   
     }
 
 
@@ -1123,6 +1216,7 @@ int main(int argc, char **argv)
     cudaDeviceSynchronize();
 
     kcb1.cpy_d2h_return();
+    min_dist = kcb1.min_dist_host;
     printf("min_dist: %f\n", kcb1.min_dist_host);
 
 
@@ -1165,26 +1259,7 @@ int main(int argc, char **argv)
     cout<<"problem 1 2 3 time: "<<duration.count() / 1000000. <<" sec"<<endl;
 
 
-
-    // cudaSetDevice(0);
-    // problem2(stream0[1], argv[1], &hit_time_step);
-    // printf("hit_time_step: %d\n", hit_time_step);
-
-
-
-
-
-
-    // hit_time_step = 10;
-    // cudaSetDevice(0);
-    // auto start = high_resolution_clock::now();
-    // problem3(stream0[1], argv[1], hit_time_step, &gravity_device_id, &missile_cost);
-    // auto stop = high_resolution_clock::now();
-    // auto duration = duration_cast<microseconds>(stop - start);
-    // cout<<"problem 3 time: "<<duration.count() / 1000000. <<" sec"<<endl;
-    // printf("gravity_device_id: %d, missile_cost: %f\n", gravity_device_id, missile_cost);
-  
-
+    write_output(argv[2], min_dist, hit_time_step, gravity_device_id, missile_cost);
 
 
 

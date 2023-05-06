@@ -234,7 +234,9 @@ int main(int argc, char** argv) {
                 dz = qz[planet] - qz[asteroid];
                 if (dx * dx + dy * dy + dz * dz < param::planet_radius * param::planet_radius) {
                     success = false;
+                    printf("hit, step: %d\n", step);
                     break;
+                    
                 }
             }
 

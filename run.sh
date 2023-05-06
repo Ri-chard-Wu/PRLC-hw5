@@ -4,11 +4,11 @@
 
 # make clean; make seq #2> make-stderr.out
 
-# testCase=30
+# testCase=20
 # ./nbody ./testcases/b$testCase.in out
 # python3 ./validate.py out ./testcases/b$testCase.out
 
-
+#------------------------------------------------
 
 
 
@@ -21,8 +21,9 @@ cd ~/hw5
 make clean; make 2> make-stderr.out
 RunFile=./hw5
 
-# testCase=200
-testCase=512
+testCase=20
+# testCase=512
+# testCase=1024
 
 inFile=./testcases/b$testCase.in
 
@@ -37,7 +38,7 @@ if [ -f "$RunFile" ]; then
 
     export CUDA_VISIBLE_DEVICES=0,1
     
-    ./$RunFile $inFile $outFile 2> run-stderr.out
+    ./$RunFile $inFile $outFile > run-stderr.out
     # nvprof --metrics ipc ./$RunFile $inFile $outFile > run-stderr.out
 
     echo "==================================="
@@ -51,7 +52,7 @@ if [ -f "$RunFile" ]; then
     echo "=            Validate             ="
     echo "==================================="
 
-    # python3 ./validate.py $outFile $golden_outFile
+    python3 ./validate.py $outFile $golden_outFile
     # rm $outFile
 
 else
