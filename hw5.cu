@@ -29,7 +29,7 @@ double gravity_device_mass(double m0, double t) {
     return m0 + 0.5 * m0 * fabs(sin(t / 6000));
 }
 
-__device__
+__host__ __device__ 
 double get_missile_cost(double t) {
     return 1e5 + 1e3 * t; 
 }
@@ -826,6 +826,12 @@ class KCB2{
         return step - 1 == n_steps;
     }
 
+    void free(){
+        cudaFree(bodyArray1_dev);
+        cudaFree(bodyArray2_dev);
+        cudaFree(hit_time_step_dev);
+    }
+
     int n_block;
     dim3 nThreadsPerBlock;
 
@@ -841,8 +847,7 @@ class KCB2{
 };
 
 
-    // kernel_bodyArray_cpy<<<1, 128, 0, stream[0]>>>\
-    //                 (bodyArray1_dev_array[i], bodyArray2_dev_array[i]);
+
 
 __global__ void kernel_bodyArray_cpy(int n, Body *bodyArray_src, Body *bodyArray_dst){
 
@@ -868,31 +873,28 @@ class KCB3{
 
     public:
 
-    KCB3(cudaStream_t *stream, char* filename, DevDistroyCkpt *ddckptArray_dev, 
-                                            DevDistroyCkpt *ddckptArray_host, int n_dev){
+    KCB3(cudaStream_t *stream, KCB2 *kcb2){
 
-        init_commom(stream, filename);
+        this->ddckptArray_dev = kcb2->ddckptArray_dev;
+        this->ddckptArray_host = kcb2->ddckptArray_host;
+        this->n_dev = kcb2->input->n_dev;
+        this->input = kcb2->input;
+
+        init_commom(stream);
 
         // problem specific
-        this->ddckptArray_dev = ddckptArray_dev;
-        this->ddckptArray_host = ddckptArray_host;
-        this->n_dev = n_dev;
         init();
     }
 
-    void init_commom(cudaStream_t *stream, char* filename){
-        input = new Input();
-        read_input(filename, input);
-        // step = 1;
-        
-        this->stream = new cudaStream_t[2];
-        this->stream[0] = stream[0];
-        this->stream[1] = stream[1];
+    void init_commom(cudaStream_t *stream){
+        // input = new Input();
+        // read_input(filename, input);
+
+        this->stream = stream;
+
 
         n_block = input->n / N_THRD_PER_BLK_X + 1;
         nThreadsPerBlock = dim3(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
-
-        // cudaMalloc(&bodyArray2_dev, input->n * sizeof(Body));
     }
 
 
@@ -900,20 +902,23 @@ class KCB3{
     void init(){   
 
         stepArray = new int[n_dev];
-
+        ddstepArray = new int[n_dev];
         for(int i = 0; i < n_dev; i++){
             cudaMemcpy((BYTE *)(stepArray + i), ((BYTE *)(ddckptArray_dev)) + \
-                         4 + i * sizeof(DevDistroyCkpt), sizeof(int), cudaMemcpyDeviceToHost);            
+                 4 + i * sizeof(DevDistroyCkpt), sizeof(int), cudaMemcpyDeviceToHost);   
+            ddstepArray[i] = stepArray[i];
         }
+
 
 
         bodyArray1_dev_array = new Body*[n_dev];
         bodyArray2_dev_array = new Body*[n_dev];
-
         for(int i = 0; i < n_dev; i++){
             bodyArray1_dev_array[i] = ddckptArray_host[i].bodyArray;
             cudaMalloc(&(bodyArray2_dev_array[i]), input->n * sizeof(Body));
         }       
+
+
 
         success_dev_array = new BYTE*[n_dev];
         success_host_array = new int[n_dev];
@@ -921,6 +926,8 @@ class KCB3{
             cudaMalloc(&(success_dev_array[i]), sizeof(int));
             success_host_array[i] = 1;
         }        
+
+
 
         step_global = 0;
         for(int i = 0; i < 2; i++) jobIdArray[i] = -1;
@@ -930,8 +937,7 @@ class KCB3{
         for(int i = 0; i < 2; i++){
             if(jobIdArray[i] != -1) JobId_next = jobIdArray[i] + 1;
         }
-        if(JobId_next == n_dev) JobId_next = -1;
-
+        if(JobId_next >= n_dev) JobId_next = -1;
     }
 
 
@@ -939,10 +945,11 @@ class KCB3{
 
         for(int i = 0; i < n_dev; i++){
 
-            kernel_bodyArray_cpy<<<1, 512, 0, stream[0]>>>\
-                            (bodyArray1_dev_array[i], bodyArray2_dev_array[i]);
+            kernel_bodyArray_cpy<<<1, 512, 0, stream[i % 2]>>>\
+                            (input->n, bodyArray1_dev_array[i], bodyArray2_dev_array[i]);
         }
-                       
+
+        cudaDeviceSynchronize();    
     }
 
     // problem specific
@@ -967,7 +974,7 @@ class KCB3{
     }
 
 
-    bool all_done(){
+    bool all_job_done(){
         return ((jobIdArray[0] == -1) && (jobIdArray[1] == -1));
     }
 
@@ -978,7 +985,7 @@ class KCB3{
         if(JobId_next != -1){
 
             JobId_next++;
-            if(JobId_next == n_dev) JobId_next = -1;
+            if(JobId_next >= n_dev) JobId_next = -1;
         }
     }
 
@@ -989,16 +996,20 @@ class KCB3{
         for(int i = 0; i < 2; i ++){
             
             int jobId = jobIdArray[i];
+            if(jobId == -1) continue;
+            
             one_step_stream(i, jobId);
 
-            // check early stop
+            
             if(((step_global) & (16 - 1)) == 0){
+
+                // check early stop
                 if(success_host_array[jobId] == 0) replace_job(i);
                 cpy_async_d2h_return(jobId);
-            }              
 
-            // check done
-            if(stepArray[jobId] - 1 == n_steps) replace_job(i);
+                // check done
+                if(stepArray[jobId] - 1 >= n_steps) replace_job(i);
+            }              
         }
   
         step_global++;
@@ -1008,7 +1019,13 @@ class KCB3{
 
     void one_step_stream(int streamId, int jobId){
         
+        // printf("jobId/n_dev: %d / %d\n", jobId, n_dev);
+        // printf("step: %d\n", stepArray[jobId]);
+        // printf("success_host_array[jobId]: %d\n", success_host_array[jobId]);
+        // printf("\n-------------------------\n");
+
         if(jobId == -1) return;
+        if(stepArray[jobId] - 1 >= n_steps) return;
 
         kernel_problem3<<<n_block, nThreadsPerBlock, 0, stream[streamId]>>>\
                 (stepArray[jobId], input->n, bodyArray1_dev_array[jobId], bodyArray2_dev_array[jobId],
@@ -1021,6 +1038,23 @@ class KCB3{
         bodyArray2_dev_array[jobId] = tmp;
     }
 
+    void process_return(){
+
+        int min_step = n_steps + 1;
+        gravity_device_id = -1;
+
+        for(int i = 0; i < n_dev; i++){
+
+            if(success_host_array[i] == 0)continue;
+
+            if(ddstepArray[i] < min_step) {
+                min_step = ddstepArray[i];
+                gravity_device_id = ddckptArray_host[i].deviceId;
+            }
+        }
+        if(gravity_device_id == -1) {missile_cost = 0.;}
+        else {missile_cost = get_missile_cost(min_step * dt);}
+    }
 
     int n_block;
     dim3 nThreadsPerBlock;
@@ -1028,11 +1062,12 @@ class KCB3{
     int JobId_next;
 
     int *stepArray;
+    int *ddstepArray;
     int step_global;
     Input *input;
     Body **bodyArray1_dev_array, **bodyArray2_dev_array;
 
-    cudaStream_t stream[2];
+    cudaStream_t *stream;
 
     // problem specific
     BYTE **success_dev_array;
@@ -1040,124 +1075,10 @@ class KCB3{
     DevDistroyCkpt *ddckptArray_dev;
     DevDistroyCkpt *ddckptArray_host;
     int n_dev;
+
+    double missile_cost;
+    int gravity_device_id;
 };
-
-
-
-
-
-
-// void problem3(cudaStream_t stream, char* filename, int hit_time_step, 
-//                                         int *gravity_device_id_ptr, double *missile_cost_ptr){
-
-//     Input input;
-//     Body *bodyArray1_dev, *bodyArray2_dev;
-
-//     read_input(filename, &input);
-//     swapBody(&input, input.planetId, 0);
-
-//     cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
-//     cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
-
-
-//     BYTE *missile_cost_dev;
-//     double missile_cost_host;
-//     cudaMalloc(&missile_cost_dev, sizeof(double));
-
-//     BYTE *success_dev;
-//     int success_host;
-//     cudaMalloc(&success_dev, sizeof(int));
-
-
-
-//     int n_block = input.n / N_THRD_PER_BLK_X + 1;
-//     dim3 nThreadsPerBlock(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
-
-//     int n_batch = input.n / BATCH_SIZE;
-//     if(n_batch * BATCH_SIZE < input.n) n_batch += 1;
-
-
-//     int gravity_device_id_min = -1;
-//     double missile_cost_min = std::numeric_limits<double>::infinity();
-
-
-//     if(hit_time_step != -2){
-
-//         for(int i = 0; i < input.n; i++){
-
-//             if(input.bodyArray[i].isDevice != 1) continue;
-//             if(input.bodyArray[i].m == 0) continue;
-
-//             int gravity_device_id = i;
-//             swapBody(&input, gravity_device_id, 1);
-
-
-//             success_host = 1;
-//             cudaMemcpy(success_dev, (BYTE *)&success_host,
-//                                 sizeof(int), cudaMemcpyHostToDevice);            
-
-//             cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(input.bodyArray),
-//                                     input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
-//             cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(input.bodyArray),
-//                                     input.n * sizeof(Body), cudaMemcpyHostToDevice);
-
-
-//             for (int step = 1; step <= n_steps + 1; step++) {
-
-//                 kernel_problem3<<<n_block, nThreadsPerBlock, 0, stream>>>\
-//                         (step, n_batch, input.n, input.asteroidId, 
-//                         bodyArray1_dev, bodyArray2_dev, missile_cost_dev, success_dev);
-
-
-//                 if((step & (16 - 1)) == 0){
-//                     cudaMemcpyAsync((BYTE *)&success_host, success_dev, 
-//                                                     sizeof(int), cudaMemcpyDeviceToHost);
-
-//                     if(success_host != 1) break;
-//                 } 
-
-//                 Body *tmp = bodyArray1_dev;
-//                 bodyArray1_dev = bodyArray2_dev;
-//                 bodyArray2_dev = tmp;
-               
-                
-//             }
-
-//             cudaDeviceSynchronize();
-
-//             cudaMemcpy((BYTE *)&success_host, success_dev, 
-//                                             sizeof(int), cudaMemcpyDeviceToHost);
-//             cudaMemcpy((BYTE *)&missile_cost_host, missile_cost_dev, 
-//                                             sizeof(double), cudaMemcpyDeviceToHost);
-
-
-            
-//             if(success_host == 1){
-//                 if(missile_cost_host < missile_cost_min){                   
-//                     missile_cost_min = missile_cost_host;
-//                     gravity_device_id_min = gravity_device_id;
-//                 }
-//             }
-
-//             swapBody(&input, gravity_device_id, 1);
-//         }
-
-//     }
-
-
-                            
-//     if(gravity_device_id_min == -1){
-//         *gravity_device_id_ptr = -1;
-//         *missile_cost_ptr = 0;
-//     }
-//     else{  
-//         *gravity_device_id_ptr = gravity_device_id_min;
-//         *missile_cost_ptr = missile_cost_min;
-//     }
-
-
-// }
 
 
 
@@ -1180,17 +1101,17 @@ int main(int argc, char **argv)
     for (int i = 0; i < 2; ++i) cudaStreamCreate(&stream1[i]);
     
 
+    auto start = high_resolution_clock::now();
+
     // -----------------------------------------------------------
 
+    // cudaSetDevice(1);
 
-    // cudaSetDevice(0);
-
-    // KCB1 kcb1(stream0[0], argv[1]);
+    // KCB1 kcb1(stream1[0], argv[1]);
 
     // kcb1.cpy_h2d_setup_common();
     // kcb1.cpy_h2d_setup();
 
-    // auto start = high_resolution_clock::now();
 
     // for(int step = 1; step <= n_steps; step++){
     //     kcb1.one_step();
@@ -1198,10 +1119,6 @@ int main(int argc, char **argv)
 
     // kcb1.sync();
     // kcb1.cpy_d2h_return();
-    
-    // auto stop = high_resolution_clock::now();
-    // auto duration = duration_cast<microseconds>(stop - start);
-    // cout<<"problem 1 time: "<<duration.count() / 1000000. <<" sec"<<endl;
 
 
     // printf("min_dist: %f\n", kcb1.min_dist_host);
@@ -1235,24 +1152,46 @@ int main(int argc, char **argv)
         hit_time_step = kcb2.hit_time_step_host;
     }
 
+    // kcb2.free();
+
     printf("hit_time_step: %d\n", hit_time_step);
 
-    int step1;
-    cudaMemcpy((BYTE *)(&step1), ((BYTE *)(kcb2.ddckptArray_dev)) + 4 + sizeof(DevDistroyCkpt), 
-                    4, cudaMemcpyDeviceToHost);
-
-    printf("step1: %d\n", step1);
-                    
     // -----------------------------------------------------------
 
-    // cudaSetDevice(0);
+    cudaSetDevice(0);
 
-    // KCB3 kcb3(stream0, argv[1], kcb2.ddckptArray_dev, kcb2.ddckptArray_host, kcb2.n_dev);
+    KCB3 kcb3(stream0, &kcb2);
 
+    kcb3.cpy_h2d_setup_common();
+    kcb3.cpy_h2d_setup();
+
+    while(!kcb3.all_job_done()){
+
+        kcb3.one_step();
+    }
+
+    cudaDeviceSynchronize();
+    for(int i=0;i<kcb3.n_dev;i++){
+        kcb3.cpy_d2h_return(i);
+    }
+    
+
+    kcb3.process_return();
+
+    gravity_device_id = kcb3.gravity_device_id;
+    missile_cost = kcb3.missile_cost;
+
+    printf("gravity_device_id: %d\n", gravity_device_id);
+    printf("missile_cost: %f\n", missile_cost);
 
 
     // -----------------------------------------------------------
 
+
+    
+    auto stop = high_resolution_clock::now();
+    auto duration = duration_cast<microseconds>(stop - start);
+    cout<<"problem 1 time: "<<duration.count() / 1000000. <<" sec"<<endl;
 
 
 

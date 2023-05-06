@@ -21,7 +21,7 @@ cd ~/hw5
 make clean; make 2> make-stderr.out
 RunFile=./hw5
 
-testCase=200
+testCase=100
 # testCase=512
 
 inFile=./testcases/b$testCase.in
