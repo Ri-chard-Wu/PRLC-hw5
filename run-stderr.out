@@ -1,5 +1,5 @@
-min_dist: 81702310.140862
-hit_time_step: 111752
-gravity_device_id: 510
-missile_cost: 5839720000.000000
-problem 1 2 3 time: 37.0208 sec
+min_dist: 11283183.768746
+hit_time_step: 138784
+gravity_device_id: -1
+missile_cost: 0.000000
+problem 1 2 3 time: 2.53422 sec

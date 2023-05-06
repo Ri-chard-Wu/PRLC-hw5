@@ -911,12 +911,10 @@ class KCB2{
 
     // problem specific
     void one_step(){
-        
-        if(done()){
-            if((step & (16 - 1)) == 0) cpy_async_d2h_return();
-            step++;
-            return;
-        }
+
+        // cudaSetDevice(gpuId);
+
+        if(done())return;
 
         if((step & (16 - 1)) == 0) cpy_async_d2h_return();
 
@@ -998,6 +996,7 @@ class KCB3{
         this->input = kcb2->input;
         this->kcb2 = kcb2;
 
+        this->gpuId = gpuId;
         cudaSetDevice(gpuId);
 
         init_commom();
