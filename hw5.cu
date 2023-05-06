@@ -885,31 +885,8 @@ __global__ void kernel_bodyArray_cpy(int n, Body *bodyArray_src, Body *bodyArray
             bodyArray_dst[i * nTrd + tid] = bodyArray_src[i * nTrd + tid];
         }
     }
-    
 }
 
-
-class KCB_2_3{
-
-    public:
-
-    KCB_2_3(int gpuId, char* filename){
-
-        kcb2 = new KCB2(gpuId, filename);
-        kcb3 = new KCB3(gpuId, kcb2);
-    }
-
-    void one_step(){
-        kcb2->one_step();
-        kcb3->check_new_job();
-        kcb3->one_step();
-    }
-
-
-    int gpuId;
-    KCB2 *kcb2;
-    KCB3 *kcb3;
-}
 
 
 class KCB3{
@@ -927,9 +904,7 @@ class KCB3{
         cudaSetDevice(gpuId);
 
         init_commom();
-        init();
-        // cpy_h2d_setup_common();
-        // cpy_h2d_setup();        
+        init();    
     }
 
     void init_commom(){
@@ -941,7 +916,6 @@ class KCB3{
     }
 
 
-    // problem specific
     void init(){   
 
         stepArray = new int[n_dev];
@@ -949,13 +923,6 @@ class KCB3{
         for(int i = 0; i < n_dev; i++){
             stepArray[i] = -1;
         }
-        
-        // for(int i = 0; i < n_dev; i++){
-        //     cudaMemcpy((BYTE *)(stepArray + i), ((BYTE *)(ddckptArray_dev)) + \
-        //          4 + i * sizeof(DevDistroyCkpt), sizeof(int), cudaMemcpyDeviceToHost);   
-        //     ddstepArray[i] = stepArray[i];
-        // }
-
 
 
         bodyArray1_dev_array = new Body*[n_dev];
@@ -966,40 +933,16 @@ class KCB3{
         }       
 
 
-
         success_dev_array = new BYTE*[n_dev];
         success_host_array = new int[n_dev];
         for(int i = 0; i < n_dev; i++){
             cudaMalloc(&(success_dev_array[i]), sizeof(int));
             success_host_array[i] = 1;
         }        
-
-
-
-        // step_global = 0;
-        // for(int i = 0; i < 2; i++) jobIdArray[i] = -1;
-        // for(int i = 0; i < min(2, n_dev); i++) jobIdArray[i] = i;
-
-        // JobId_next = -1;
-        // for(int i = 0; i < 2; i++){
-        //     if(jobIdArray[i] != -1) JobId_next = jobIdArray[i] + 1;
-        // }
-        // if(JobId_next >= n_dev) JobId_next = -1;
     }
 
 
-    void cpy_h2d_setup_common(){
 
-        // for(int i = 0; i < n_dev; i++){
-
-        //     kernel_bodyArray_cpy<<<1, 512, 0, stream[i % 2]>>>\
-        //                     (input->n, bodyArray1_dev_array[i], bodyArray2_dev_array[i]);
-        // }
-
-        // cudaDeviceSynchronize();    
-    }
-
-    // problem specific
     void cpy_h2d_setup(int jobId, int streamId){
 
         kernel_bodyArray_cpy<<<1, 512, 0, stream[streamId]>>>\
@@ -1008,18 +951,20 @@ class KCB3{
         cudaMemcpy(success_dev_array[jobId], (BYTE *)&(success_host_array[jobId]),
                                         sizeof(int), cudaMemcpyHostToDevice); 
 
-        // cudaStreamSynchronize();
         cudaStreamSynchronize(stream[streamId]);
     }
+
 
 
     void check_new_job(){
         
         for(int i = 0; i < n_dev; i++){
+
             if(stepArray[i] != -1) continue;
             if(kcb2->ddckptArray_host[i].step == -1) continue;
 
             stepArray[i] = kcb2->ddckptArray_host[i].step;
+            ddstepArray[i] = kcb2->ddckptArray_host[i].step;
             cpy_h2d_setup(i, streamId_next);
             streamId_next = (streamId_next + 1) % n_stream;
         }
@@ -1049,7 +994,7 @@ class KCB3{
 
 
     bool done_job(int jobId){
-        return ((stepArray[JobId] - 1 >= n_steps) || (success_host_array[jobId] == 0));
+        return ((stepArray[jobId] - 1 >= n_steps) || (success_host_array[jobId] == 0));
     }
 
 
@@ -1058,7 +1003,7 @@ class KCB3{
         for(int i = 0; i < n_dev; i ++){
             
             if(stepArray[i] == -1) continue;
-            if(done(i)) continue;
+            if(done_job(i)) continue;
 
             cudaSetDevice(gpuId);
 
@@ -1149,49 +1094,48 @@ int main(int argc, char **argv)
     auto stop = high_resolution_clock::now();
     auto duration = duration_cast<microseconds>(stop - start);
 
-    // start = high_resolution_clock::now();
+    start = high_resolution_clock::now();
 
     // -----------------------------------------------------------
 
     KCB1 kcb1(1, argv[1]);
-
-    while(!kcb1.done()){
-        kcb1.one_step();
-    }
-
-
-    // -----------------------------------------------------------
-
     KCB2 kcb2(0, argv[1]);
-
-    while(!kcb2.done()){
-        kcb2.one_step();
-    }
-
-    // -----------------------------------------------------------
-
     KCB3 kcb3(0, &kcb2);
 
-    while(!kcb3.all_job_done()){
-        kcb3.one_step();
+
+
+    while((!kcb1.done()) || (!kcb2.done()) || (!kcb3.done())){
+        kcb1.one_step();
+        kcb2.one_step();
+        kcb3.check_new_job();  
+        kcb3.one_step();      
     }
+
+
 
 
 
     // -----------------------------------------------------------
 
     cudaSetDevice(1);
-
     cudaDeviceSynchronize();
+    cudaSetDevice(0);
+    cudaDeviceSynchronize();
+
     kcb1.cpy_d2h_return();
     printf("min_dist: %f\n", kcb1.min_dist_host);
 
-    cudaSetDevice(0);
+
+
+
+
+
+    
 
     if(kcb2.hit_time_step_host != -2){
         hit_time_step = kcb2.hit_time_step_host;
     }else{
-        cudaDeviceSynchronize();
+        // cudaDeviceSynchronize();
         kcb2.cpy_d2h_return();
         hit_time_step = kcb2.hit_time_step_host;
     }
@@ -1199,7 +1143,10 @@ int main(int argc, char **argv)
     printf("hit_time_step: %d\n", hit_time_step);
 
 
-    cudaDeviceSynchronize();
+
+
+    // cudaDeviceSynchronize();
+
     for(int i=0;i<kcb3.n_dev;i++){
         kcb3.cpy_d2h_return(i);
     }
@@ -1213,9 +1160,9 @@ int main(int argc, char **argv)
     // -----------------------------------------------------------
 
     
-    // stop = high_resolution_clock::now();
-    // duration = duration_cast<microseconds>(stop - start);
-    // cout<<"problem 1 time: "<<duration.count() / 1000000. <<" sec"<<endl;
+    stop = high_resolution_clock::now();
+    duration = duration_cast<microseconds>(stop - start);
+    cout<<"problem 1 2 3 time: "<<duration.count() / 1000000. <<" sec"<<endl;
 
 
 
