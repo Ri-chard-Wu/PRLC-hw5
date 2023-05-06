@@ -5,8 +5,12 @@
 # make clean; make seq #2> make-stderr.out
 
 # testCase=20
-# ./nbody ./testcases/b$testCase.in out
+# ./nbody ./testcases/b$testCase.in out > run-stderr-seq.out
 # python3 ./validate.py out ./testcases/b$testCase.out
+
+
+
+
 
 #------------------------------------------------
 
@@ -21,7 +25,7 @@ cd ~/hw5
 make clean; make 2> make-stderr.out
 RunFile=./hw5
 
-testCase=20
+testCase=512
 # testCase=512
 # testCase=1024
 

@@ -213,6 +213,8 @@ int main(int argc, char** argv) {
                     run_step(step, n, qx, qy, qz, vx, vy, vz, m, type);
                 }
 
+
+
                 // check missile hit device.
                 if(m[gravity_device_id] != 0){
                    
@@ -225,13 +227,35 @@ int main(int argc, char** argv) {
                     if (dx * dx + dy * dy + dz * dz < travel_dist * travel_dist) {
                         missile_cost = param::get_missile_cost((step + 1) * param::dt);
                         m[gravity_device_id] = 0;
-                    }
+                        // printf("destroy, step: %d\n", step);
+                        // printf("[p3] qx, qy, qz, m: %f, %f, %f, %f\n", vx[19], 
+                        //                                                vy[19], 
+                        //                                                vz[19],
+                        //                                                m[19]);   
+
+                        // dx = qx[planet] - qx[asteroid];
+                        // dy = qy[planet] - qy[asteroid];
+                        // dz = qz[planet] - qz[asteroid];
+                        // printf("step %d: dx * dx + dy * dy + dz * dz: %f\n",
+                        //      step, dx * dx + dy * dy + dz * dz);
+
+
+                    }                    
                 }
+                else{
+                    dx = qx[planet] - qx[asteroid];
+                    dy = qy[planet] - qy[asteroid];
+                    dz = qz[planet] - qz[asteroid];
+                    printf("step %d: dx * dx + dy * dy + dz * dz: %f\n",
+                            step, dx * dx + dy * dy + dz * dz);                    
+                }
+
 
                 // check asteroid hit planet.
                 dx = qx[planet] - qx[asteroid];
                 dy = qy[planet] - qy[asteroid];
                 dz = qz[planet] - qz[asteroid];
+
                 if (dx * dx + dy * dy + dz * dz < param::planet_radius * param::planet_radius) {
                     success = false;
                     printf("hit, step: %d\n", step);
