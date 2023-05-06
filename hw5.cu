@@ -597,9 +597,9 @@ class KCB1{
     KCB1(cudaStream_t stream, char* filename){
 
         init_commom(stream, filename);
-
-        // problem specific
         init();
+        cpy_h2d_setup_common();
+        cpy_h2d_setup();
     }
 
     void init_commom(cudaStream_t stream, char* filename){
@@ -660,12 +660,14 @@ class KCB1{
         min_dist_host = sqrt(min_dist_sq_host);                       
     }
 
-    void sync(){
-        cudaDeviceSynchronize();
+    bool done(){
+        return (step - 1 >= n_steps);
     }
 
     // problem specific
     void one_step(){
+
+        if(done()) return;
 
         kernel_problem1<<<n_block, nThreadsPerBlock, 0, stream>>>\
                 (step, input->n, bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
@@ -677,9 +679,6 @@ class KCB1{
         bodyArray2_dev = tmp;
     }
 
-    bool done(){
-        return step - 1 == n_steps;
-    }
 
     int n_block;
     dim3 nThreadsPerBlock;
@@ -706,9 +705,9 @@ class KCB2{
     KCB2(cudaStream_t stream, char* filename){
 
         init_commom(stream, filename);
-
-        // problem specific
         init();
+        cpy_h2d_setup_common();
+        cpy_h2d_setup();        
     }
 
     void init_commom(cudaStream_t stream, char* filename){
@@ -786,30 +785,36 @@ class KCB2{
                                         sizeof(int), cudaMemcpyHostToDevice);                                        
     }
 
-    // problem specific
-    bool can_break(){
-        return (hit_time_step_host != -2);
+
+    bool done(){
+        return ((hit_time_step_host != -2) || (step - 1 >= n_steps));
     }   
 
     // problem specific
     void cpy_d2h_return(){
         cudaMemcpy((BYTE *)&hit_time_step_host, hit_time_step_dev, 
-                                        sizeof(int), cudaMemcpyDeviceToHost);                       
+                                        sizeof(int), cudaMemcpyDeviceToHost);          
+
+        cudaMemcpy((BYTE *)ddckptArray_host, (BYTE *)ddckptArray_dev, 
+                        input->n_dev * sizeof(DevDistroyCkpt), cudaMemcpyDeviceToHost);
     }
 
     // problem specific
     void cpy_async_d2h_return(){
+
         cudaMemcpyAsync((BYTE *)&hit_time_step_host, hit_time_step_dev, 
-                                        sizeof(int), cudaMemcpyDeviceToHost);                   
+                                        sizeof(int), cudaMemcpyDeviceToHost);    
+
+        cudaMemcpyAsync((BYTE *)ddckptArray_host, (BYTE *)ddckptArray_dev, 
+                        input->n_dev * sizeof(DevDistroyCkpt), cudaMemcpyDeviceToHost);
     }
 
-    void sync(){
-        cudaDeviceSynchronize();
-    }
 
     // problem specific
     void one_step(){
         
+        if(done()) return;
+        if((step & (16 - 1)) == 0) cpy_async_d2h_return();
 
         kernel_problem2<<<n_block, nThreadsPerBlock, 0, stream>>>\
                 (step, input->n, bodyArray1_dev, bodyArray2_dev,
@@ -822,9 +827,6 @@ class KCB2{
         bodyArray2_dev = tmp;
     }
 
-    bool done(){
-        return step - 1 == n_steps;
-    }
 
     void free(){
         cudaFree(bodyArray1_dev);
@@ -881,9 +883,9 @@ class KCB3{
         this->input = kcb2->input;
 
         init_commom(stream);
-
-        // problem specific
         init();
+        cpy_h2d_setup_common();
+        cpy_h2d_setup();        
     }
 
     void init_commom(cudaStream_t *stream){
@@ -1102,26 +1104,21 @@ int main(int argc, char **argv)
     
 
     auto start = high_resolution_clock::now();
+    auto stop = high_resolution_clock::now();
+    auto duration = duration_cast<microseconds>(stop - start);
+
+
+    // start = high_resolution_clock::now();
 
     // -----------------------------------------------------------
 
-    // cudaSetDevice(1);
+    cudaSetDevice(1);
 
-    // KCB1 kcb1(stream1[0], argv[1]);
-
-    // kcb1.cpy_h2d_setup_common();
-    // kcb1.cpy_h2d_setup();
-
-
-    // for(int step = 1; step <= n_steps; step++){
-    //     kcb1.one_step();
-    // }
-
-    // kcb1.sync();
-    // kcb1.cpy_d2h_return();
-
-
-    // printf("min_dist: %f\n", kcb1.min_dist_host);
+    KCB1 kcb1(stream1[0], argv[1]);
+    
+    while(!kcb1.done()){
+        kcb1.one_step();
+    }
 
 
     // -----------------------------------------------------------
@@ -1131,30 +1128,9 @@ int main(int argc, char **argv)
 
     KCB2 kcb2(stream0[0], argv[1]);
 
-    kcb2.cpy_h2d_setup_common();
-    kcb2.cpy_h2d_setup();
-
-    for(int step = 1; step <= n_steps; step++){
-
+    while(!kcb2.done()){
         kcb2.one_step();
-
-        if((step & (16 - 1)) == 0){
-            if(kcb2.can_break()) break;
-            kcb2.cpy_async_d2h_return();
-        }
     }
-
-    if(kcb2.can_break()){
-        hit_time_step = kcb2.hit_time_step_host;
-    }else{
-        kcb2.sync();
-        kcb2.cpy_d2h_return();
-        hit_time_step = kcb2.hit_time_step_host;
-    }
-
-    // kcb2.free();
-
-    printf("hit_time_step: %d\n", hit_time_step);
 
     // -----------------------------------------------------------
 
@@ -1162,36 +1138,50 @@ int main(int argc, char **argv)
 
     KCB3 kcb3(stream0, &kcb2);
 
-    kcb3.cpy_h2d_setup_common();
-    kcb3.cpy_h2d_setup();
-
     while(!kcb3.all_job_done()){
-
         kcb3.one_step();
     }
+
+
+
+    // -----------------------------------------------------------
+
+    cudaSetDevice(1);
+
+    cudaDeviceSynchronize();
+    kcb1.cpy_d2h_return();
+    printf("min_dist: %f\n", kcb1.min_dist_host);
+
+    cudaSetDevice(0);
+
+    if(kcb2.hit_time_step_host != -2){
+        hit_time_step = kcb2.hit_time_step_host;
+    }else{
+        cudaDeviceSynchronize();
+        kcb2.cpy_d2h_return();
+        hit_time_step = kcb2.hit_time_step_host;
+    }
+    // kcb2.free();
+    printf("hit_time_step: %d\n", hit_time_step);
+
 
     cudaDeviceSynchronize();
     for(int i=0;i<kcb3.n_dev;i++){
         kcb3.cpy_d2h_return(i);
     }
-    
-
     kcb3.process_return();
-
     gravity_device_id = kcb3.gravity_device_id;
     missile_cost = kcb3.missile_cost;
-
     printf("gravity_device_id: %d\n", gravity_device_id);
     printf("missile_cost: %f\n", missile_cost);
 
 
     // -----------------------------------------------------------
 
-
     
-    auto stop = high_resolution_clock::now();
-    auto duration = duration_cast<microseconds>(stop - start);
-    cout<<"problem 1 time: "<<duration.count() / 1000000. <<" sec"<<endl;
+    // stop = high_resolution_clock::now();
+    // duration = duration_cast<microseconds>(stop - start);
+    // cout<<"problem 1 time: "<<duration.count() / 1000000. <<" sec"<<endl;
 
 
 

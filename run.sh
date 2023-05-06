@@ -21,7 +21,7 @@ cd ~/hw5
 make clean; make 2> make-stderr.out
 RunFile=./hw5
 
-testCase=100
+testCase=50
 # testCase=512
 
 inFile=./testcases/b$testCase.in
@@ -37,7 +37,7 @@ if [ -f "$RunFile" ]; then
 
     export CUDA_VISIBLE_DEVICES=0,1
     
-    ./$RunFile $inFile $outFile > run-stderr.out
+    ./$RunFile $inFile $outFile 2> run-stderr.out
     # nvprof --metrics ipc ./$RunFile $inFile $outFile > run-stderr.out
 
     echo "==================================="
