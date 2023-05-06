@@ -594,22 +594,27 @@ class KCB1{
 
     public:
 
-    KCB1(cudaStream_t stream, char* filename){
+    KCB1(int gpuId, char* filename){
 
-        init_commom(stream, filename);
+        this->gpuId = gpuId;
+        cudaSetDevice(gpuId);
+        
+
+        init_commom(filename);
         init();
         cpy_h2d_setup_common();
         cpy_h2d_setup();
     }
 
-    void init_commom(cudaStream_t stream, char* filename){
+    void init_commom(char* filename){
         
         input = new Input();
         read_input(filename, input);
         
         step = 1;
-        this->stream = stream;
 
+        cudaStreamCreate(&stream);
+    
         n_block = input->n / N_THRD_PER_BLK_X + 1;
         nThreadsPerBlock = dim3(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
 
@@ -650,11 +655,11 @@ class KCB1{
                                         sizeof(double), cudaMemcpyHostToDevice);
     }
 
-    void cpy_d2h_check(){
-    }
+
 
     // problem specific
     void cpy_d2h_return(){
+        cudaSetDevice(gpuId);
         cudaMemcpy((BYTE *)&min_dist_sq_host, min_dist_sq_dev, 
                                         sizeof(double), cudaMemcpyDeviceToHost); 
         min_dist_host = sqrt(min_dist_sq_host);                       
@@ -668,6 +673,8 @@ class KCB1{
     void one_step(){
 
         if(done()) return;
+        
+        cudaSetDevice(gpuId);
 
         kernel_problem1<<<n_block, nThreadsPerBlock, 0, stream>>>\
                 (step, input->n, bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
@@ -679,7 +686,7 @@ class KCB1{
         bodyArray2_dev = tmp;
     }
 
-
+    int gpuId;
     int n_block;
     dim3 nThreadsPerBlock;
 
@@ -702,19 +709,24 @@ class KCB2{
 
     public:
 
-    KCB2(cudaStream_t stream, char* filename){
+    KCB2(int gpuId, char* filename){
 
-        init_commom(stream, filename);
+        this->gpuId = gpuId;
+
+        cudaSetDevice(gpuId);
+
+        init_commom(filename);
         init();
         cpy_h2d_setup_common();
         cpy_h2d_setup();        
     }
 
-    void init_commom(cudaStream_t stream, char* filename){
+    void init_commom(char* filename){
         input = new Input();
         read_input(filename, input);
         step = 1;
-        this->stream = stream;
+
+        cudaStreamCreate(&stream);
 
         n_block = input->n / N_THRD_PER_BLK_X + 1;
         nThreadsPerBlock = dim3(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
@@ -792,6 +804,7 @@ class KCB2{
 
     // problem specific
     void cpy_d2h_return(){
+        cudaSetDevice(gpuId);
         cudaMemcpy((BYTE *)&hit_time_step_host, hit_time_step_dev, 
                                         sizeof(int), cudaMemcpyDeviceToHost);          
 
@@ -801,6 +814,7 @@ class KCB2{
 
     // problem specific
     void cpy_async_d2h_return(){
+        cudaSetDevice(gpuId);
 
         cudaMemcpyAsync((BYTE *)&hit_time_step_host, hit_time_step_dev, 
                                         sizeof(int), cudaMemcpyDeviceToHost);    
@@ -816,6 +830,8 @@ class KCB2{
         if(done()) return;
         if((step & (16 - 1)) == 0) cpy_async_d2h_return();
 
+        cudaSetDevice(gpuId);
+
         kernel_problem2<<<n_block, nThreadsPerBlock, 0, stream>>>\
                 (step, input->n, bodyArray1_dev, bodyArray2_dev,
                      hit_time_step_dev, ddckptArray_dev, input->n_dev);
@@ -829,11 +845,13 @@ class KCB2{
 
 
     void free(){
+        cudaSetDevice(gpuId);
         cudaFree(bodyArray1_dev);
         cudaFree(bodyArray2_dev);
         cudaFree(hit_time_step_dev);
     }
 
+    int gpuId;
     int n_block;
     dim3 nThreadsPerBlock;
 
@@ -871,29 +889,52 @@ __global__ void kernel_bodyArray_cpy(int n, Body *bodyArray_src, Body *bodyArray
 }
 
 
+class KCB_2_3{
+
+    public:
+
+    KCB_2_3(int gpuId, char* filename){
+
+        kcb2 = new KCB2(gpuId, filename);
+        kcb3 = new KCB3(gpuId, kcb2);
+    }
+
+    void one_step(){
+        kcb2->one_step();
+        kcb3->check_new_job();
+        kcb3->one_step();
+    }
+
+
+    int gpuId;
+    KCB2 *kcb2;
+    KCB3 *kcb3;
+}
+
+
 class KCB3{
 
     public:
 
-    KCB3(cudaStream_t *stream, KCB2 *kcb2){
+    KCB3(int gpuId, KCB2 *kcb2){
 
         this->ddckptArray_dev = kcb2->ddckptArray_dev;
         this->ddckptArray_host = kcb2->ddckptArray_host;
         this->n_dev = kcb2->input->n_dev;
         this->input = kcb2->input;
+        this->kcb2 = kcb2;
 
-        init_commom(stream);
+        cudaSetDevice(gpuId);
+
+        init_commom();
         init();
-        cpy_h2d_setup_common();
-        cpy_h2d_setup();        
+        // cpy_h2d_setup_common();
+        // cpy_h2d_setup();        
     }
 
-    void init_commom(cudaStream_t *stream){
-        // input = new Input();
-        // read_input(filename, input);
+    void init_commom(){
 
-        this->stream = stream;
-
+        for (int i = 0; i < n_stream; ++i) cudaStreamCreate(&stream[i]);
 
         n_block = input->n / N_THRD_PER_BLK_X + 1;
         nThreadsPerBlock = dim3(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
@@ -906,10 +947,14 @@ class KCB3{
         stepArray = new int[n_dev];
         ddstepArray = new int[n_dev];
         for(int i = 0; i < n_dev; i++){
-            cudaMemcpy((BYTE *)(stepArray + i), ((BYTE *)(ddckptArray_dev)) + \
-                 4 + i * sizeof(DevDistroyCkpt), sizeof(int), cudaMemcpyDeviceToHost);   
-            ddstepArray[i] = stepArray[i];
+            stepArray[i] = -1;
         }
+        
+        // for(int i = 0; i < n_dev; i++){
+        //     cudaMemcpy((BYTE *)(stepArray + i), ((BYTE *)(ddckptArray_dev)) + \
+        //          4 + i * sizeof(DevDistroyCkpt), sizeof(int), cudaMemcpyDeviceToHost);   
+        //     ddstepArray[i] = stepArray[i];
+        // }
 
 
 
@@ -931,114 +976,107 @@ class KCB3{
 
 
 
-        step_global = 0;
-        for(int i = 0; i < 2; i++) jobIdArray[i] = -1;
-        for(int i = 0; i < min(2, n_dev); i++) jobIdArray[i] = i;
+        // step_global = 0;
+        // for(int i = 0; i < 2; i++) jobIdArray[i] = -1;
+        // for(int i = 0; i < min(2, n_dev); i++) jobIdArray[i] = i;
 
-        JobId_next = -1;
-        for(int i = 0; i < 2; i++){
-            if(jobIdArray[i] != -1) JobId_next = jobIdArray[i] + 1;
-        }
-        if(JobId_next >= n_dev) JobId_next = -1;
+        // JobId_next = -1;
+        // for(int i = 0; i < 2; i++){
+        //     if(jobIdArray[i] != -1) JobId_next = jobIdArray[i] + 1;
+        // }
+        // if(JobId_next >= n_dev) JobId_next = -1;
     }
 
 
     void cpy_h2d_setup_common(){
 
-        for(int i = 0; i < n_dev; i++){
+        // for(int i = 0; i < n_dev; i++){
 
-            kernel_bodyArray_cpy<<<1, 512, 0, stream[i % 2]>>>\
-                            (input->n, bodyArray1_dev_array[i], bodyArray2_dev_array[i]);
+        //     kernel_bodyArray_cpy<<<1, 512, 0, stream[i % 2]>>>\
+        //                     (input->n, bodyArray1_dev_array[i], bodyArray2_dev_array[i]);
+        // }
+
+        // cudaDeviceSynchronize();    
+    }
+
+    // problem specific
+    void cpy_h2d_setup(int jobId, int streamId){
+
+        kernel_bodyArray_cpy<<<1, 512, 0, stream[streamId]>>>\
+                        (input->n, bodyArray1_dev_array[jobId], bodyArray2_dev_array[jobId]);
+                        
+        cudaMemcpy(success_dev_array[jobId], (BYTE *)&(success_host_array[jobId]),
+                                        sizeof(int), cudaMemcpyHostToDevice); 
+
+        // cudaStreamSynchronize();
+        cudaStreamSynchronize(stream[streamId]);
+    }
+
+
+    void check_new_job(){
+        
+        for(int i = 0; i < n_dev; i++){
+            if(stepArray[i] != -1) continue;
+            if(kcb2->ddckptArray_host[i].step == -1) continue;
+
+            stepArray[i] = kcb2->ddckptArray_host[i].step;
+            cpy_h2d_setup(i, streamId_next);
+            streamId_next = (streamId_next + 1) % n_stream;
         }
-
-        cudaDeviceSynchronize();    
     }
+    
 
-    // problem specific
-    void cpy_h2d_setup(){
-   
-        for(int i = 0; i < n_dev; i++){
-            cudaMemcpy(success_dev_array[i], (BYTE *)&(success_host_array[i]),
-                                            sizeof(int), cudaMemcpyHostToDevice); 
-        }  
-    }
 
-    // problem specific
     void cpy_d2h_return(int i){
+        cudaSetDevice(gpuId);
         cudaMemcpy((BYTE *)&(success_host_array[i]), success_dev_array[i], 
                                         sizeof(int), cudaMemcpyDeviceToHost);                  
     }
 
-    // problem specific
+
     void cpy_async_d2h_return(int i){
+        cudaSetDevice(gpuId);
         cudaMemcpyAsync((BYTE *)&(success_host_array[i]), success_dev_array[i], 
                                         sizeof(int), cudaMemcpyDeviceToHost);                   
     }
 
 
-    bool all_job_done(){
-        return ((jobIdArray[0] == -1) && (jobIdArray[1] == -1));
-    }
-
-    void replace_job(int streamId){
-
-        jobIdArray[streamId] = JobId_next;
-
-        if(JobId_next != -1){
-
-            JobId_next++;
-            if(JobId_next >= n_dev) JobId_next = -1;
-        }
+    bool done(){
+        bool done = true;
+        for(int i = 0; i < n_dev; i ++) done = done && done_job(i);
+        return done;
     }
 
 
-    // problem specific
+    bool done_job(int jobId){
+        return ((stepArray[JobId] - 1 >= n_steps) || (success_host_array[jobId] == 0));
+    }
+
+
     void one_step(){
         
-        for(int i = 0; i < 2; i ++){
+        for(int i = 0; i < n_dev; i ++){
             
-            int jobId = jobIdArray[i];
-            if(jobId == -1) continue;
-            
-            one_step_stream(i, jobId);
+            if(stepArray[i] == -1) continue;
+            if(done(i)) continue;
 
-            
-            if(((step_global) & (16 - 1)) == 0){
+            cudaSetDevice(gpuId);
 
-                // check early stop
-                if(success_host_array[jobId] == 0) replace_job(i);
-                cpy_async_d2h_return(jobId);
+            kernel_problem3<<<n_block, nThreadsPerBlock, 0, stream[streamId_next]>>>\
+                    (stepArray[i], input->n, bodyArray1_dev_array[i], bodyArray2_dev_array[i],
+                        success_dev_array[i]);
 
-                // check done
-                if(stepArray[jobId] - 1 >= n_steps) replace_job(i);
-            }              
+            streamId_next = (streamId_next + 1) % n_stream;
+            stepArray[i]++;
+
+            Body *tmp = bodyArray1_dev_array[i];
+            bodyArray1_dev_array[i] = bodyArray2_dev_array[i];
+            bodyArray2_dev_array[i] = tmp;
+
+            if(((stepArray[i]) & (16 - 1)) == 0) cpy_async_d2h_return(i);
         }
-  
-        step_global++;
-    }
+    }    
 
-
-
-    void one_step_stream(int streamId, int jobId){
-        
-        // printf("jobId/n_dev: %d / %d\n", jobId, n_dev);
-        // printf("step: %d\n", stepArray[jobId]);
-        // printf("success_host_array[jobId]: %d\n", success_host_array[jobId]);
-        // printf("\n-------------------------\n");
-
-        if(jobId == -1) return;
-        if(stepArray[jobId] - 1 >= n_steps) return;
-
-        kernel_problem3<<<n_block, nThreadsPerBlock, 0, stream[streamId]>>>\
-                (stepArray[jobId], input->n, bodyArray1_dev_array[jobId], bodyArray2_dev_array[jobId],
-                     success_dev_array[jobId]);
-
-        stepArray[jobId]++;
-
-        Body *tmp = bodyArray1_dev_array[jobId];
-        bodyArray1_dev_array[jobId] = bodyArray2_dev_array[jobId];
-        bodyArray2_dev_array[jobId] = tmp;
-    }
 
     void process_return(){
 
@@ -1058,6 +1096,10 @@ class KCB3{
         else {missile_cost = get_missile_cost(min_step * dt);}
     }
 
+
+
+
+    int gpuId;
     int n_block;
     dim3 nThreadsPerBlock;
     int jobIdArray[2];
@@ -1069,9 +1111,12 @@ class KCB3{
     Input *input;
     Body **bodyArray1_dev_array, **bodyArray2_dev_array;
 
-    cudaStream_t *stream;
+    int streamId_next = 0;
+    cudaStream_t stream[4];
+    int n_stream = 4;
 
     // problem specific
+    KCB2 *kcb2;
     BYTE **success_dev_array;
     int *success_host_array;
     DevDistroyCkpt *ddckptArray_dev;
@@ -1098,24 +1143,18 @@ int main(int argc, char **argv)
     cudaStream_t stream0[2];
     for (int i = 0; i < 2; ++i) cudaStreamCreate(&stream0[i]);
     
-    cudaSetDevice(1);
-    cudaStream_t stream1[2];
-    for (int i = 0; i < 2; ++i) cudaStreamCreate(&stream1[i]);
-    
+
 
     auto start = high_resolution_clock::now();
     auto stop = high_resolution_clock::now();
     auto duration = duration_cast<microseconds>(stop - start);
 
-
     // start = high_resolution_clock::now();
 
     // -----------------------------------------------------------
 
-    cudaSetDevice(1);
+    KCB1 kcb1(1, argv[1]);
 
-    KCB1 kcb1(stream1[0], argv[1]);
-    
     while(!kcb1.done()){
         kcb1.one_step();
     }
@@ -1123,10 +1162,7 @@ int main(int argc, char **argv)
 
     // -----------------------------------------------------------
 
-
-    cudaSetDevice(0);
-
-    KCB2 kcb2(stream0[0], argv[1]);
+    KCB2 kcb2(0, argv[1]);
 
     while(!kcb2.done()){
         kcb2.one_step();
@@ -1134,9 +1170,7 @@ int main(int argc, char **argv)
 
     // -----------------------------------------------------------
 
-    cudaSetDevice(0);
-
-    KCB3 kcb3(stream0, &kcb2);
+    KCB3 kcb3(0, &kcb2);
 
     while(!kcb3.all_job_done()){
         kcb3.one_step();
