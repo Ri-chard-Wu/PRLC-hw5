@@ -26,8 +26,8 @@ make clean; make 2> make-stderr.out
 RunFile=./hw5
 
 # testCase=100
-# testCase=512
-testCase=1024
+testCase=512
+# testCase=1024
 
 inFile=./testcases/b$testCase.in
 
@@ -56,7 +56,7 @@ if [ -f "$RunFile" ]; then
     echo "=            Validate             ="
     echo "==================================="
 
-    # python3 ./validate.py $outFile $golden_outFile
+    python3 ./validate.py $outFile $golden_outFile
     # rm $outFile
 
 else

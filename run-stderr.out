@@ -1,2 +1,5 @@
-problem 1 time: 57.2598 sec
-min_dist_host: 135992167.064949
+min_dist: 81702310.140862
+hit_time_step: 111752
+gravity_device_id: 510
+missile_cost: 5839720000.000000
+problem 1 2 3 time: 21.5698 sec
