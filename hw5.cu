@@ -18,7 +18,7 @@
 
 #define n_steps 200000
 #define dt 60
-#define eps 1e-3
+#define eps 1e-6
 #define G 6.674e-11
 #define planet_radius 1e7
 #define missile_speed 1e6
@@ -39,30 +39,14 @@ double get_missile_cost(double t) {
 using namespace std::chrono;
 using namespace std;
 
-// // 34 sec
-// #define N_THRD_PER_BLK_X 4
-// #define N_THRD_PER_BLK_Y 32
-
-// // 54 sec
-// #define N_THRD_PER_BLK_X 4
-// #define N_THRD_PER_BLK_Y 64
-
-// // 37 sec
-// #define N_THRD_PER_BLK_X 5
-// #define N_THRD_PER_BLK_Y 32
-
-// // 41 sec
-// #define N_THRD_PER_BLK_X 4
-// #define N_THRD_PER_BLK_Y 16
-
-#define N_THRD_PER_BLK_X 16
-#define N_THRD_PER_BLK_Y 8
+#define N_THRD_PER_BLK_X 4
+#define N_THRD_PER_BLK_Y 32
 #define N_THRD_PER_BLK (N_THRD_PER_BLK_X * N_THRD_PER_BLK_Y)
 
 
 #define BODY_SIZE_BYTE 64 
 #define BODY_SIZE_WORD 16 
-#define BATCH_SIZE (N_THRD_PER_BLK_X)
+#define BATCH_SIZE (N_THRD_PER_BLK_Y)
 #define BATCH_SIZE_WORD (BATCH_SIZE * BODY_SIZE_WORD)
 
 // need to make sure that this is int.
@@ -72,28 +56,21 @@ using namespace std;
 typedef unsigned int WORD;
 typedef unsigned char BYTE;
 
-// struct Body{
+struct Body{
     
-//     double qx, qy, qz, vx, vy, vz, m;
-//     long long isDevice;
-    
-// };
-
-
-struct BodyArray{
-    
-    double *qx, *qy, *qz, *vx, *vy, *vz, *m;
-    int *isDevice;
+    double qx, qy, qz, vx, vy, vz, m;
+    long long isDevice;
     
 };
-
 
 struct Input{
     int n;
     int planetId;
     int asteroidId;
-    BodyArray bodyArray;
+    Body *bodyArray;
 };
+
+
 
 
 
@@ -102,282 +79,164 @@ void read_input(const char* filename, Input *input) {
     std::ifstream fin(filename);
     fin >> input->n >> input->planetId >> input->asteroidId;
 
-    input->bodyArray.qx = new double[input->n];
-    input->bodyArray.qy = new double[input->n];
-    input->bodyArray.qz = new double[input->n];
-    input->bodyArray.vx = new double[input->n];
-    input->bodyArray.vy = new double[input->n];
-    input->bodyArray.vz = new double[input->n];
-    input->bodyArray.m = new double[input->n];
-    input->bodyArray.isDevice = new int[input->n];
+    input->bodyArray = new Body[input->n];
 
     string type;
 
     for (int i = 0; i < input->n; i++) {
-        fin >> input->bodyArray.qx[i]
-            >> input->bodyArray.qy[i]
-            >> input->bodyArray.qz[i]
-            >> input->bodyArray.vx[i]
-            >> input->bodyArray.vy[i]
-            >> input->bodyArray.vz[i]
-            >> input->bodyArray.m[i]
+        fin >> input->bodyArray[i].qx 
+            >> input->bodyArray[i].qy
+            >> input->bodyArray[i].qz 
+            >> input->bodyArray[i].vx 
+            >> input->bodyArray[i].vy 
+            >> input->bodyArray[i].vz 
+            >> input->bodyArray[i].m 
             >> type;
         
         if (type != "device"){
-            input->bodyArray.isDevice[i] = 0;
+            input->bodyArray[i].isDevice = 0;
         }
         else{
-            input->bodyArray.isDevice[i] = 1;
+            input->bodyArray[i].isDevice = 1;
         }
     }
 }
 
 
 
+__global__ void kernel_problem1(int step, int n_batch, int n, int planetId, int asteroidId,
+                                BYTE *bodyArray, BYTE *bodyArray_update, BYTE *min_dist_sq){
 
-__global__ void kernel_problem1(int step, int n, int planetId, int asteroidId,
-                BodyArray *bodyArray, BodyArray *bodyArray_update, BYTE *min_dist_sq){
-
-
-    int bodyId_this = blockIdx.x * blockDim.y + threadIdx.y;
-    // int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    int bodyId_this = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
-    double qx, qy, qz;
-    
+    double vx, vy, vz, qx, qy, qz;
+   
     if(bodyId_this < n){
-        qx = bodyArray->qx[bodyId_this];
-        qy = bodyArray->qy[bodyId_this];
-        qz = bodyArray->qz[bodyId_this];
+       
+        qx = ((Body *)bodyArray)[bodyId_this].qx;
+        qy = ((Body *)bodyArray)[bodyId_this].qy;
+        qz = ((Body *)bodyArray)[bodyId_this].qz;
     }
 
     // update min_dist.
-    if((bodyId_this == planetId) && (threadIdx.x == 0)){
+    if((bodyId_this == planetId) && (threadIdx.y == 0)){
 
-        dx = qx - bodyArray->qx[asteroidId];
-        dy = qy - bodyArray->qy[asteroidId];
-        dz = qz - bodyArray->qz[asteroidId];
+        dx = qx - ((Body *)bodyArray)[asteroidId].qx;
+        dy = qy - ((Body *)bodyArray)[asteroidId].qy;
+        dz = qz - ((Body *)bodyArray)[asteroidId].qz;
 
         *((double *)min_dist_sq) = min(*((double *)min_dist_sq), 
                                              dx * dx + dy * dy + dz * dz);  
     }
 
-    __shared__ double sm[BATCH_SIZE_WORD + N_THRD_PER_BLK_Y * 3 * 2 * N_THRD_PER_BLK_X];
-    double *sm_double = (double *)sm;
-    int *sm_int = (int *)sm;
+    __shared__ WORD sm[BATCH_SIZE_WORD + N_THRD_PER_BLK_Y * 3 * 2 * N_THRD_PER_BLK_X];
     double *sm_aggregate = (double *)(sm + BATCH_SIZE_WORD);
 
 
-
-    int n_batch = n / BATCH_SIZE;
-    if(n_batch * BATCH_SIZE < n) n_batch += 1;
-
     for(int batchId = 0; batchId < n_batch; batchId++){
 
-        if(batchId * BATCH_SIZE + threadIdx.x < n){
+        for(int i = 0; i < BATCH_SIZE; i += N_BODY_COPY_PER_PASS){
 
-            sm_double[0 * BATCH_SIZE + threadIdx.x] = bodyArray->qx[batchId * BATCH_SIZE + threadIdx.x];
-            sm_double[1 * BATCH_SIZE + threadIdx.x] = bodyArray->qy[batchId * BATCH_SIZE + threadIdx.x];
-            sm_double[2 * BATCH_SIZE + threadIdx.x] = bodyArray->qz[batchId * BATCH_SIZE + threadIdx.x];
-            sm_double[3 * BATCH_SIZE + threadIdx.x] = bodyArray->m[batchId * BATCH_SIZE + threadIdx.x];
-            sm_int[8 * BATCH_SIZE + threadIdx.x] = bodyArray->isDevice[batchId * BATCH_SIZE + threadIdx.x];
+            int global_offset = batchId * BATCH_SIZE_WORD;
+            int local_offset = i * BODY_SIZE_WORD + tid;
+            int idx = global_offset + local_offset;
+
+            if(idx < n * BODY_SIZE_WORD){
+                sm[local_offset] = ((WORD *)bodyArray)[idx];
+            }
         }
-
-
 
         __syncthreads();
 
-        int bodyId_other = batchId * BATCH_SIZE + threadIdx.x;
+        int bodyId_other = batchId * BATCH_SIZE + threadIdx.y;
         
         if ((bodyId_other != bodyId_this) && (bodyId_other < n)){
             
-            double mj = sm_double[3 * BATCH_SIZE + threadIdx.x];
+            dx = ((Body *)sm)[threadIdx.y].qx - qx;
+            dy = ((Body *)sm)[threadIdx.y].qy - qy;
+            dz = ((Body *)sm)[threadIdx.y].qz - qz;
+
+            double mj = ((Body *)sm)[threadIdx.y].m;
      
-            if (sm_int[8 * BATCH_SIZE + threadIdx.x] == 1) {
+            if (((Body *)sm)[threadIdx.y].isDevice == 1) {
                 mj = gravity_device_mass(mj, step * dt);
             }
 
-            dx = sm_double[0 * BATCH_SIZE + threadIdx.x] - qx;
-            dy = sm_double[1 * BATCH_SIZE + threadIdx.x] - qy;
-            dz = sm_double[2 * BATCH_SIZE + threadIdx.x] - qz;
+            // double dist3 = pow(dx * dx + dy * dy + dz * dz + eps, 1.5);
+            double dist2 = dx * dx + dy * dy + dz * dz + eps;
+            double dist3 = sqrt(dist2) * dist2;
 
-            double dist3 = pow(dx * dx + dy * dy + dz * dz + eps * eps, 1.5);
+
 
             ax += G * mj * dx / dist3;    
             ay += G * mj * dy / dist3;    
             az += G * mj * dz / dist3; 
+
+       
+
         }
     }
 
+    sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 0] = ax * dt;
+    sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 1] = ay * dt;
+    sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 2] = az * dt;
 
-
-    sm_aggregate[threadIdx.x * (3 * blockDim.y) + 3 * threadIdx.y + 0] = ax * dt;
-    sm_aggregate[threadIdx.x * (3 * blockDim.y) + 3 * threadIdx.y + 1] = ay * dt;
-    sm_aggregate[threadIdx.x * (3 * blockDim.y) + 3 * threadIdx.y + 2] = az * dt;
-
-    // sm_aggregate[0 * blockDim.x * blockDim.y + (threadIdx.y * blockDim.x + threadIdx.x)] = ax * dt;
-    // sm_aggregate[1 * blockDim.x * blockDim.y + (threadIdx.y * blockDim.x + threadIdx.x)] = ay * dt;
-    // sm_aggregate[2 * blockDim.x * blockDim.y + (threadIdx.y * blockDim.x + threadIdx.x)] = az * dt;
-    
     __syncthreads();
 
    
                       
-    for(int binSize = 2; binSize <= blockDim.x; binSize = binSize << 1){
+    for(int binSize = 2; binSize <= blockDim.y; binSize = binSize << 1){
 
-        if((threadIdx.x & (binSize - 1)) == 0){
+        if((threadIdx.y & (binSize - 1)) == 0){
 
-            sm_aggregate[threadIdx.x * (3 * blockDim.y) + 3 * threadIdx.y + 0] += \
-                sm_aggregate[(threadIdx.x + (binSize >> 1)) * (3 * blockDim.y) \
-                        + 3 * threadIdx.y + 0];
+            sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 0] += \
+                sm_aggregate[(threadIdx.y + (binSize >> 1)) * (3 * blockDim.x) \
+                        + 3 * threadIdx.x + 0];
             
-            sm_aggregate[threadIdx.x * (3 * blockDim.y) + 3 * threadIdx.y + 1] += \
-                sm_aggregate[(threadIdx.x + (binSize >> 1)) * (3 * blockDim.y) \
-                        + 3 * threadIdx.y + 1];
-
-            sm_aggregate[threadIdx.x * (3 * blockDim.y) + 3 * threadIdx.y + 2] += \
-                sm_aggregate[(threadIdx.x + (binSize >> 1)) * (3 * blockDim.y) \
-                        + 3 * threadIdx.y + 2];
+            sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 1] += \
+                sm_aggregate[(threadIdx.y + (binSize >> 1)) * (3 * blockDim.x) \
+                        + 3 * threadIdx.x + 1];
+            
+            sm_aggregate[threadIdx.y * (3 * blockDim.x) + 3 * threadIdx.x + 2] += \
+                sm_aggregate[(threadIdx.y + (binSize >> 1)) * (3 * blockDim.x) \
+                        + 3 * threadIdx.x + 2];
 
         }
         __syncthreads();
     }
 
+    
+    __syncthreads();
 
 
-    if((threadIdx.x == 0) && (bodyId_this < n)){
+    if(threadIdx.y == 0){
 
-        double vx = bodyArray->vx[bodyId_this];
-        double vy = bodyArray->vy[bodyId_this];
-        double vz = bodyArray->vz[bodyId_this];
-        
-        vx += sm_aggregate[3 * threadIdx.y + 0];
-        vy += sm_aggregate[3 * threadIdx.y + 1];
-        vz += sm_aggregate[3 * threadIdx.y + 2];
+        vx = ((Body *)bodyArray)[bodyId_this].vx;
+        vy = ((Body *)bodyArray)[bodyId_this].vy;
+        vz = ((Body *)bodyArray)[bodyId_this].vz;
 
-        bodyArray_update->vx[bodyId_this] = vx;
-        bodyArray_update->vy[bodyId_this] = vy;
-        bodyArray_update->vz[bodyId_this] = vz;
+        vx += sm_aggregate[3 * threadIdx.x + 0];
+        vy += sm_aggregate[3 * threadIdx.x + 1];
+        vz += sm_aggregate[3 * threadIdx.x + 2];
 
-        bodyArray_update->qx[bodyId_this] = qx + vx * dt;
-        bodyArray_update->qy[bodyId_this] = qy + vy * dt;
-        bodyArray_update->qz[bodyId_this] = qz + vz * dt;
+        qx += vx * dt;
+        qy += vy * dt;
+        qz += vz * dt; 
+
+        // write back.
+        if(bodyId_this < n){
+            ((Body *)bodyArray_update)[bodyId_this].vx = vx;
+            ((Body *)bodyArray_update)[bodyId_this].vy = vy;
+            ((Body *)bodyArray_update)[bodyId_this].vz = vz;
+
+            ((Body *)bodyArray_update)[bodyId_this].qx = qx;
+            ((Body *)bodyArray_update)[bodyId_this].qy = qy;
+            ((Body *)bodyArray_update)[bodyId_this].qz = qz; 
+        }  
     }
 }
-
-
-
-
-
-
-
-void problem1(cudaStream_t stream, char* filename, double *min_dist_sq_ptr){
-
-    Input input;
-    read_input(filename, &input);
-    for (int i = 0; i < input.n; i++) {
-        if (input.bodyArray.isDevice[i] == 1) input.bodyArray.m[i] = 0;
-    }
-
-
-
-    BYTE *min_dist_sq_dev;
-
-    BodyArray *bodyArray1_dev, *bodyArray2_dev;
-    BodyArray bodyArray_host1, bodyArray_host2;
-    
-    // ----------------------------------------
-
-    cudaMalloc(&(bodyArray_host1.qx), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host1.qy), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host1.qz), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host1.vx), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host1.vy), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host1.vz), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host1.m), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host1.isDevice), input.n * sizeof(int));
-
-    cudaMemcpy((BYTE *)(bodyArray_host1.qx), (BYTE *)(input.bodyArray.qx), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host1.qy), (BYTE *)(input.bodyArray.qy), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host1.qz), (BYTE *)(input.bodyArray.qz), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host1.vx), (BYTE *)(input.bodyArray.vx), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host1.vy), (BYTE *)(input.bodyArray.vy), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host1.vz), (BYTE *)(input.bodyArray.vz), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host1.m), (BYTE *)(input.bodyArray.m), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host1.isDevice), (BYTE *)(input.bodyArray.isDevice), input.n * sizeof(int), cudaMemcpyHostToDevice);
-
-    cudaMalloc(&bodyArray1_dev, sizeof(BodyArray));
-
-    cudaMemcpy((BYTE *)bodyArray1_dev, (BYTE *)(&bodyArray_host1),
-                            sizeof(BodyArray), cudaMemcpyHostToDevice);
-    // ----------------------------------------
-
-
-    cudaMalloc(&(bodyArray_host2.qx), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host2.qy), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host2.qz), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host2.vx), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host2.vy), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host2.vz), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host2.m), input.n * sizeof(double));
-    cudaMalloc(&(bodyArray_host2.isDevice), input.n * sizeof(int));
-
-    cudaMemcpy((BYTE *)(bodyArray_host2.qx), (BYTE *)(input.bodyArray.qx), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host2.qy), (BYTE *)(input.bodyArray.qy), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host2.qz), (BYTE *)(input.bodyArray.qz), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host2.vx), (BYTE *)(input.bodyArray.vx), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host2.vy), (BYTE *)(input.bodyArray.vy), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host2.vz), (BYTE *)(input.bodyArray.vz), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host2.m), (BYTE *)(input.bodyArray.m), input.n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy((BYTE *)(bodyArray_host2.isDevice), (BYTE *)(input.bodyArray.isDevice), input.n * sizeof(int), cudaMemcpyHostToDevice);
-
-
-    cudaMalloc(&bodyArray2_dev, sizeof(BodyArray));
-    
-    cudaMemcpy((BYTE *)bodyArray2_dev, (BYTE *)(&bodyArray_host2),
-                            sizeof(BodyArray), cudaMemcpyHostToDevice);
-
-
-    // ----------------------------------------
-
-    double min_dist_sq_host = std::numeric_limits<double>::infinity();
-    double min_dist_host;
-
-    cudaMalloc(&min_dist_sq_dev, sizeof(double));
-    cudaMemcpyAsync(min_dist_sq_dev, (BYTE *)&min_dist_sq_host,
-                                    sizeof(double), cudaMemcpyHostToDevice);
-
-    int n_block = input.n / N_THRD_PER_BLK_Y + 1;
-    dim3 nThreadsPerBlock(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
-
-    // printf("[host] qx, qy, qz: %f, %f, %f\n", input.bodyArray.m[10], 
-    //                                           input.bodyArray.vy[10], 
-    //                                           input.bodyArray.vz[10]);
-
-    auto start = high_resolution_clock::now();
-
-    for (int step = 1; step <= n_steps + 1; step++) {
-
-        kernel_problem1<<<n_block, nThreadsPerBlock, 0, stream>>>\
-                (step, input.n, input.planetId, input.asteroidId, 
-                             bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
-        
-        BodyArray *tmp = bodyArray1_dev;
-        bodyArray1_dev = bodyArray2_dev;
-        bodyArray2_dev = tmp;
-    }
-
-
-    auto stop = high_resolution_clock::now();
-    auto duration = duration_cast<microseconds>(stop - start);
-    cout<<"problem 1 time: "<<duration.count() / 1000000. <<" sec"<<endl;
-
-    cudaMemcpyAsync((BYTE *)min_dist_sq_ptr, min_dist_sq_dev, 
-                                    sizeof(double), cudaMemcpyDeviceToHost);    
-
-}
-
-
 
 
 
@@ -385,33 +244,93 @@ void problem1(cudaStream_t stream, char* filename, double *min_dist_sq_ptr){
 
 int main(int argc, char **argv)
 {
+    Input input;
+    BYTE *bodyArray1_dev, *bodyArray2_dev, *min_dist_sq_dev;
+
+
+
+
+    read_input(argv[1], &input);
+
+    for (int i = 0; i < input.n; i++) {
+        if (input.bodyArray[i].isDevice == 1) input.bodyArray[i].m = 0;
+    }
 
     cudaSetDevice(0);
-    cudaStream_t stream0[2];
-    for (int i = 0; i < 2; ++i) cudaStreamCreate(&stream0[i]);
-    
-    cudaSetDevice(1);
-    cudaStream_t stream1[2];
-    for (int i = 0; i < 2; ++i) cudaStreamCreate(&stream1[i]);
-    
 
+    cudaMalloc(&bodyArray1_dev, input.n * sizeof(Body));
+    cudaMemcpy(bodyArray1_dev, (BYTE *)(input.bodyArray),
+                            input.n * sizeof(Body), cudaMemcpyHostToDevice);
 
+    cudaMalloc(&bodyArray2_dev, input.n * sizeof(Body));
+    cudaMemcpy(bodyArray2_dev, (BYTE *)(input.bodyArray),
+                            input.n * sizeof(Body), cudaMemcpyHostToDevice);
 
+    double min_dist_sq_host = std::numeric_limits<double>::infinity();
 
-    cudaSetDevice(0);
-    double min_dist, min_dist_sq;
-    problem1(stream0[0], argv[1], &min_dist_sq);
+    cudaMalloc(&min_dist_sq_dev, sizeof(double));
+    cudaMemcpy(min_dist_sq_dev, (BYTE *)&min_dist_sq_host,
+                                    sizeof(double), cudaMemcpyHostToDevice);
+
+    int n_block = input.n / N_THRD_PER_BLK_X + 1;
+    dim3 nThreadsPerBlock(N_THRD_PER_BLK_X, N_THRD_PER_BLK_Y, 1);
+
+    int n_batch = input.n / BATCH_SIZE;
+    if(n_batch * BATCH_SIZE < input.n) n_batch += 1;
+
+    auto start = high_resolution_clock::now();
+
+    for (int step = 1; step <= n_steps + 1; step++) {
+
+        kernel_problem1<<<n_block, nThreadsPerBlock>>>(step, n_batch, input.n, input.planetId, 
+                     input.asteroidId, bodyArray1_dev, bodyArray2_dev, min_dist_sq_dev);
+        
+        BYTE *tmp = bodyArray1_dev;
+        bodyArray1_dev = bodyArray2_dev;
+        bodyArray2_dev = tmp;
+    }
+
     cudaDeviceSynchronize();
+
+    auto stop = high_resolution_clock::now();
+    auto duration = duration_cast<microseconds>(stop - start);
+    cout<<"problem 1 time: "<<duration.count() / 1000000. <<" sec"<<endl;
+
+    cudaMemcpy((BYTE *)&min_dist_sq_host, min_dist_sq_dev, 
+                                    sizeof(double), cudaMemcpyDeviceToHost);    
+
+    printf("min_dist_host: %f\n", sqrt(min_dist_sq_host));
     
-    min_dist = sqrt(min_dist_sq);
-    printf("min_dist: %f\n", min_dist);
 
 
 
 
 
 
-  
+
+
+
+
+
+
+    // Problem 1
+
+    // int size = N_BLK * N_THRD_PER_BLK;
+    // int *devSrc0, *hostSrc0;
+    // hostSrc0 = new int[size];
+    // for (int i = 0 ;i<size;i++){
+    //     hostSrc0[i] = 0;
+    // }
+
+    // cudaSetDevice(0);
+    // cudaMalloc(&devSrc0, size * sizeof(int));
+    // cudaMemcpy((unsigned char *)devSrc0, (unsigned char *)hostSrc0,
+    //                                      size * sizeof(int), cudaMemcpyHostToDevice);
+
+    // kernel<<<N_BLK, N_THRD_PER_BLK, 0>>>(devSrc0, 4);
+
+
+    // cudaDeviceSynchronize();   
 
 
 
