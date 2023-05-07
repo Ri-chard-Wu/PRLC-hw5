@@ -280,26 +280,20 @@ struct DevDistroyCkpt{
 
 
 __global__ void kernel_problem2(int step, int n, Body *bodyArray, Body *bodyArray_update, 
-                BYTE *hit_time_step, DevDistroyCkpt *ddckptArray, int n_dev, 
-                int *ddckptOk_src, int *ddckptOk_dst){
+                BYTE *hit_time_step, BYTE *hit_time_step_update, DevDistroyCkpt *ddckptArray, 
+                int n_dev, int *ddckptOk_src, int *ddckptOk_dst){
 
-    if(*((int *)hit_time_step) != -2) return;
+    if(*((int *)hit_time_step) != -2){
+
+        if(*((int *)hit_time_step_update) == -2){
+
+            *((int *)hit_time_step_update) = *((int *)hit_time_step);
+        }
+        return;
+    } 
         
     int bodyId_this = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.y * blockDim.x + threadIdx.x;                          
-    
-
-    // if(bodyId_this == 0 && threadIdx.y == 0){
-    //     for(int i = 0; i<n_dev;i++){
-    //         printf("ddckptOk_src[%d]: %d\n", i, ddckptOk_src[i]);
-    //         printf("ddckptOk_dst[%d]: %d\n", i, ddckptOk_dst[i]);
-    //     }
-    //     printf("hit_time_step: %d\n",  *((int *)hit_time_step));
-    //     *((int *)hit_time_step) = 1;
-    // }
-    // else{
-    //     return;
-    // }
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
     double qx, qy, qz;
@@ -467,10 +461,9 @@ __global__ void kernel_problem2(int step, int n, Body *bodyArray, Body *bodyArra
 
         if (dx * dx + dy * dy + dz * dz < planet_radius * planet_radius) {
             
-            *((int *)hit_time_step) = step; 
+            *((int *)hit_time_step_update) = step; 
         }
     }
-
 }
 
 
@@ -479,12 +472,10 @@ __global__ void kernel_problem2(int step, int n, Body *bodyArray, Body *bodyArra
 __global__ void kernel_problem3(int step, int n,
                         Body *bodyArray, Body *bodyArray_update, BYTE *success){
 
-
+    if(*((int *)success) == 0) return;
 
     int bodyId_this = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
-
-
 
     double ax = 0, ay = 0, az = 0, dx, dy, dz;
     double qx, qy, qz;
@@ -495,17 +486,7 @@ __global__ void kernel_problem3(int step, int n,
         qz = bodyArray[bodyId_this].qz;
     }
 
-    // check asteroid hit planet.
-    if((bodyId_this == 1) && (threadIdx.y == 0)){
 
-        dx = bodyArray[0].qx - qx;
-        dy = bodyArray[0].qy - qy;
-        dz = bodyArray[0].qz - qz;
-        
-        if (dx * dx + dy * dy + dz * dz < planet_radius * planet_radius) {
-            *((int *)success) = 0;
-        }
-    }
 
     __shared__ WORD sm[BATCH_SIZE_WORD + N_THRD_PER_BLK_Y * 3 * 2 * N_THRD_PER_BLK_X];
     double *sm_aggregate = (double *)(sm + BATCH_SIZE_WORD);
@@ -600,6 +581,20 @@ __global__ void kernel_problem3(int step, int n,
 
         v_ptr_update[threadIdx.y] = vi;
         q_ptr_update[threadIdx.y] = q_ptr_update_sm[threadIdx.y];
+    }
+    
+
+
+    // check asteroid hit planet.
+    if((bodyId_this == 1) && (threadIdx.y == 0)){
+
+        dx = bodyArray[0].qx - qx;
+        dy = bodyArray[0].qy - qy;
+        dz = bodyArray[0].qz - qz;
+        
+        if (dx * dx + dy * dy + dz * dz < planet_radius * planet_radius) {
+            *((int *)success) = 0;
+        }
     }
 }
 
@@ -763,8 +758,8 @@ class KCB2{
             hit_time_step_host = 0; 
         }
 
-        cudaMalloc(&hit_time_step_dev, sizeof(int));    
-
+        cudaMalloc(&hit_time_step1_dev, sizeof(int));   
+        cudaMalloc(&hit_time_step2_dev, sizeof(int));     
 
 
         cudaMalloc(&ddckptOk1_dev, input->n_dev * sizeof(int));
@@ -817,8 +812,11 @@ class KCB2{
     // problem specific
     void cpy_h2d_setup(){
    
-        cudaMemcpy(hit_time_step_dev, (BYTE *)&hit_time_step_host,
-                                        sizeof(int), cudaMemcpyHostToDevice);                                        
+        cudaMemcpy(hit_time_step1_dev, (BYTE *)&hit_time_step_host,
+                                        sizeof(int), cudaMemcpyHostToDevice);    
+
+        cudaMemcpy(hit_time_step2_dev, (BYTE *)&hit_time_step_host,
+                                        sizeof(int), cudaMemcpyHostToDevice);  
     }
 
 
@@ -833,7 +831,7 @@ class KCB2{
     // problem specific
     void cpy_d2h_return(){
         cudaSetDevice(gpuId);
-        cudaMemcpy((BYTE *)&hit_time_step_host, hit_time_step_dev, 
+        cudaMemcpy((BYTE *)&hit_time_step_host, hit_time_step2_dev, 
                                         sizeof(int), cudaMemcpyDeviceToHost);          
 
         cudaMemcpy((BYTE *)ddckptArray_host, (BYTE *)ddckptArray_dev, 
@@ -844,7 +842,7 @@ class KCB2{
     void cpy_async_d2h_return(){
         cudaSetDevice(gpuId);
 
-        cudaMemcpyAsync((BYTE *)&hit_time_step_host, hit_time_step_dev, 
+        cudaMemcpyAsync((BYTE *)&hit_time_step_host, hit_time_step2_dev, 
                                         sizeof(int), cudaMemcpyDeviceToHost);    
 
         cudaMemcpyAsync((BYTE *)ddckptArray_host, (BYTE *)ddckptArray_dev, 
@@ -877,7 +875,7 @@ class KCB2{
 
         kernel_problem2<<<n_block, nThreadsPerBlock, 0, stream>>>\
                 (step, input->n, bodyArray1_dev, bodyArray2_dev,
-                     hit_time_step_dev, ddckptArray_dev, input->n_dev,
+                     hit_time_step1_dev, hit_time_step2_dev, ddckptArray_dev, input->n_dev,
                      ddckptOk1_dev, ddckptOk2_dev);
 
         step++;
@@ -889,6 +887,11 @@ class KCB2{
         int *tmpInt = ddckptOk1_dev;
         ddckptOk1_dev = ddckptOk2_dev;
         ddckptOk2_dev = tmpInt;
+
+        BYTE *tmpByte = hit_time_step1_dev;
+        hit_time_step1_dev = hit_time_step2_dev;
+        hit_time_step2_dev = tmpByte;
+
     }
 
 
@@ -896,7 +899,8 @@ class KCB2{
         cudaSetDevice(gpuId);
         cudaFree(bodyArray1_dev);
         cudaFree(bodyArray2_dev);
-        cudaFree(hit_time_step_dev);
+        cudaFree(hit_time_step1_dev);
+        cudaFree(hit_time_step2_dev);
     }
 
     int gpuId;
@@ -910,7 +914,9 @@ class KCB2{
     cudaStream_t stream;
 
     // problem specific
-    BYTE *hit_time_step_dev;
+    BYTE *hit_time_step1_dev;
+    BYTE *hit_time_step2_dev;
+    
     int  hit_time_step_host = -2;
     DevDistroyCkpt *ddckptArray_dev, *ddckptArray_host;
     int *ddckptOk1_dev, *ddckptOk2_dev, *ddckptOk_host;
@@ -1160,12 +1166,6 @@ double missile_cost;
 int main(int argc, char **argv)
 {
 
-    // cudaSetDevice(0);
-    // cudaStream_t stream0[2];
-    // for (int i = 0; i < 2; ++i) cudaStreamCreate(&stream0[i]);
-    
-
-
     auto start = high_resolution_clock::now();
     auto stop = high_resolution_clock::now();
     auto duration = duration_cast<microseconds>(stop - start);
@@ -1245,8 +1245,6 @@ int main(int argc, char **argv)
 }
 
 /*
-
-
 - when star number is large
 - src & dst array work properly?
 - p2, p3, if asteroid hit planet before missile hit a device?
@@ -1254,6 +1252,4 @@ int main(int argc, char **argv)
 - p2, p3, the case where asteroid won't hit planet at all.
 - is there exist components which if don't work, 
     the result will appear to be unaffected in public testcases?
-
-
 */
